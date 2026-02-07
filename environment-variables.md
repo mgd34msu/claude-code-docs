@@ -93,7 +93,7 @@ Complete reference for all environment variables used by Claude Code CLI v2.1.34
 | `ANTHROPIC_FOUNDRY_API_KEY` | (none) | API key for Microsoft Foundry |
 | `ANTHROPIC_FOUNDRY_BASE_URL` | (none) | Microsoft Foundry base URL |
 | `ANTHROPIC_FOUNDRY_RESOURCE` | (none) | Microsoft Foundry resource identifier |
-| `ANTHROPIC_LOG` (none) | Anthropic SDK log level |
+| `ANTHROPIC_LOG` | (none) | Anthropic SDK log level |
 | `ANTHROPIC_MODEL` | (none) | Override model selection |
 | `ANTHROPIC_SMALL_FAST_MODEL` | (none) | Override small/fast model selection |
 | `ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION` | (dynamic) | AWS region for small/fast model on Bedrock |

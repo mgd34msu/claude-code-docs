@@ -326,7 +326,6 @@ Writes a file to the local filesystem. This tool will overwrite existing files.
 
 ### Implementation Details
 - **Tool name**: "Write"
-- **Tool variable**: `hG` (in minified code)
 - **Schema type**: `strictObject`
 - **Output**: Returns data about the write operation
 
@@ -374,8 +373,6 @@ Performs exact string replacements in files. This tool modifies existing files b
 
 ### Implementation Details
 - **Tool name**: "Edit"
-- **Tool constant**: `Rq` (in minified code)
-- **Tool variable**: `LG` (in minified code)
 - **Schema type**: `strictObject`
 - **Edit processing**: Edits are processed through `bQ7()` function which validates and prepares the edit operations
 - **Output**: Returns data including a diff of changes
@@ -1335,7 +1332,7 @@ Creates a new task in the task management system. Used primarily in delegate mod
 
 ### Usage Context
 
-From system prompt (tool-1.ts:10504):
+From system prompt:
 ```
 You are in delegate mode for team "{teamName}". In this mode, you can ONLY use the following tools:
 - TeammateTool: For spawning teammates, sending messages, and team coordination
@@ -1514,7 +1511,7 @@ Reads output from background tasks. When a command is run with `run_in_backgroun
 
 ### Usage Context
 
-From system message (tool-1.ts:10595):
+From system message:
 ```
 You can check its output using the TaskOutput tool.
 ```
@@ -1562,7 +1559,7 @@ Stops a running background task.
 
 ### Usage Context
 
-From system message (tool-1.ts:10578-10582):
+From system message:
 ```javascript
 if (A.status === "killed")
   return [
@@ -1639,7 +1636,7 @@ Presents interactive questions to the user with predefined options. Used for con
 
 ### Usage Examples
 
-From skill documentation (tool-2.ts:6060-6073):
+From skill documentation:
 ```javascript
 AskUserQuestion({
   questions: [{
@@ -1656,7 +1653,7 @@ AskUserQuestion({
 })
 ```
 
-From yes/no confirmation (tool-2.ts:4048-4050):
+From yes/no confirmation:
 ```javascript
 options: [
   { label: "Yes", value: "yes" },
@@ -1666,7 +1663,7 @@ options: [
 
 ### Critical Requirements
 
-From skill documentation (tool-2.ts:5976-5992):
+From skill documentation:
 ```
 ## CRITICAL: Use the AskUserQuestion Tool
 
@@ -1687,7 +1684,7 @@ CORRECT:
 Printing a question as text instead of using AskUserQuestion means the task has failed.
 ```
 
-From skill creation (agent-1.ts:4676-4677):
+From skill creation:
 ```
 You will use the AskUserQuestion to understand what the user wants to automate. Important notes:
 - Use AskUserQuestion for ALL questions! Never ask questions via plain text.
