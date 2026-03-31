@@ -1,3 +1,7 @@
+## I'm skipping 2.1.88 for obvious reasons...
+
+I will resume analysis when 2.1.89 comes out, as I don't want to give even a slight impression that I may be using leaked source code.
+
 # Claude Code Docs
 
 Unofficial deep-dive reference documentation for [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code), derived from source analysis of the bundled `cli.js`.
