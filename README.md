@@ -1,56 +1,46 @@
-## I'm skipping 2.1.88 for obvious reasons...
+# Claude Code 2.1.141 Source Notes
 
-I will resume analysis when 2.1.89 comes out, as I don't want to give even a slight impression that I may be using leaked source code.
+This directory contains source-derived notes for Claude Code 2.1.141. The
+writeups are based on the reconstructed 2.1.141 source under `source/src` in
+this checkout. Older docs from `~/Projects/claude-code-docs` were used as a
+topic checklist only; the behavior below is tied to 2.1.141.
 
-# Claude Code Docs
+## New 2.1.141 Companion Docs
 
-Unofficial deep-dive reference documentation for [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code), derived from source analysis of the bundled `cli.js`.
+- `agent-teams-v2.1.141.md` - team/swarm tools, file layout, teammate spawning, task lists, and messaging.
+- `auto-mode-v2.1.141.md` - auto permission mode, classifier gating, dangerous rule stripping, and bypass interactions.
+- `brief-mode-v2.1.141.md` - `SendUserMessage` / legacy `Brief`, entitlement, activation, attachments, rendering, and telemetry.
+- `cached-tokens-v2.1.141.md` - usage object fields, prompt-cache counters, server tool counters, cost tracking, and stats aggregation.
+- `channels-v2.1.141.md` - MCP channel notifications, CLI flags, allowlist/policy gates, permissions relay, and telemetry.
+- `claude-hooks-reference-v2.1.141.md` - compact index for the full hooks writeup in `hooks-v2.1.141.md`.
+- `claude-md-best-practices-v2.1.141.md` - actual 2.1.141 CLAUDE.md loading, memory hierarchy, imports, and subagent behavior.
+- `context-injection-v2.1.141.md` - every observed context injection path: CLAUDE.md, agents, hooks, MCP, output styles, skills, channels, teams.
+- `dream-and-speculation-v2.1.141.md` - auto dream, `/dream`, prompt suggestions, speculative execution, and deferred prefetch.
+- `environment-variables-v2.1.141.md` - environment variable reference organized by subsystem.
+- `inject-after-agent-finish-v2.1.141.md` - `PostToolUse` context injection after `Agent` / legacy `Task`.
+- `loop-command-v2.1.141.md` - the 2.1.141 state of `/loop`, Cron tools, durable scheduled tasks, scheduler behavior, and gates.
+- `native-tools-v2.1.141.md` - built-in tool registry, availability gates, aliases, special tools, MCP integration, and permission filtering.
+- `statsig-gates-v2.1.141.md` - build-time feature flags and runtime GrowthBook/Statsig gates observed in 2.1.141.
+- `telemetry-v2.1.141.md` - analytics architecture, privacy controls, Datadog/1P OTel sinks, metrics, and event families.
+- `tool-aliasing-v2.1.141.md` - primary tool names, aliases, legacy permission normalization, SDK compatibility names, and MCP shadowing.
+- `undocumented-features-v2.1.141.md` - hidden/experimental product surfaces observed in 2.1.141.
 
-> **Latest version covered:** Claude Code v2.1.81 (built 2026-03-20)  
-> Also includes: v2.1.71 references for tools, feature gates, /loop, and tool aliasing
+## Existing 2.1.141 Detailed Docs
 
-## What's Here
+- `agent-view-2.1.141.md` - Agent View feature writeup.
+- `hooks-v2.1.141.md` - full hooks reference.
+- `claude-print-v2.1.141.md` - `-p` / `--print` and print-mode telemetry.
+- `harness-detection-v2.1.141.md` - harness detection behavior.
 
-Each document is a standalone, exhaustive reference on a specific subsystem of Claude Code. These are not tutorials — they are technical references produced by reading the source bundle and documenting the internal behavior, schemas, and data flows.
+## Source Basis
 
-### Core References (v2.1.81)
+Most topic-specific behavior is concentrated in these areas:
 
-| Document | Description |
-|----------|-------------|
-| [Hooks System Reference](claude-hooks-reference-2.1.81.md) | Complete hooks system — all hook events, hook types, execution internals, Zod schemas, and policies |
-| [Environment Variables Reference](environment-variables-2.1.81.md) | All `CLAUDE_CODE_*`, `CLAUDE_*`, `ANTHROPIC_*` vars, feature toggle gates, boolean parsing, and third-party integrations |
-| [Telemetry Reference](telemetry-2.1.81.md) | Multi-layered telemetry with 781 unique `tengu_` event types, Segment, Datadog, and OpenTelemetry backends |
-| [Auto Mode Reference](auto-mode-2.1.81.md) | Permission modes, auto mode activation, opt-in dialog, bypass permissions, and CLI flags |
-| [Brief Mode / SendUserMessage](brief-mode-2.1.81.md) | The SendUserMessage tool, brief mode behavior, input/output schemas, and tool properties |
-| [MCP Channels System](channels-2.1.81.md) | Experimental `--channels` feature — real-time MCP server notifications pushed into running sessions |
-| [Dream Mode & Speculation](dream-and-speculation-2.1.81.md) | Background memory consolidation (dream mode), speculation system, and deferred prefetch |
-| [Undocumented Features](undocumented-features-2.1.81.md) | Feature flags, hidden CLI options, internal mechanisms, stubs, and experimental features not in official docs |
-
-### Core References (v2.1.71)
-
-| Document | Description |
-|----------|-------------|
-| [Native Tools Reference](native-tools-2.1.71.md) | All 45+ built-in tools — schemas, dispatch, parameter aliasing, permission checks |
-| [Statsig & Feature Gates](statsig-gates-2.1.71.md) | 73 unique feature flags/configs across 103 call-sites — Statsig gates, GrowthBook experiments, and dynamic configs |
-| [/loop Command Deep-Dive](loop-command-2.1.71.md) | The `/loop` scheduling command, cron tools, and the background scheduler (Statsig-gated) |
-| [Tool Aliasing & Dispatch](tool-aliasing-2.1.71.md) | Parameter aliasing (`inputParamAliases`) and tool name aliasing (`aliases[]`) in the tool dispatch pipeline |
-
-### Guides & Techniques
-
-| Document | Description |
-|----------|-------------|
-| [CLAUDE.md Best Practices](claude-md-best-practices.md) | Structuring and maintaining CLAUDE.md files across enterprise, user, project, and local levels |
-| [Context Injection Avenues](context-injection-avenues.md) | All methods for injecting system prompts and context into Claude Code and its subagents |
-| [Agent Teams Reference](agent-teams-info.md) | Agent Teams architecture — team creation, agent types, spawning, lifecycle, permissions, and tool restrictions |
-| [Injecting Context After Agent Finish](inject-after-agent-finish.md) | Using `PostToolUse` hooks to inject additional context after subagent completion |
-| [Token Tracking System](cached-tokens-misc-info.md) | API-level token keys, prompt caching mechanics, and cost calculations |
-
-## Who This Is For
-
-- **Power users** building custom hooks, agent teams, or CLAUDE.md configurations
-- **Developers** integrating Claude Code into CI/CD pipelines or enterprise toolchains
-- **Researchers** studying Claude Code's internal architecture, telemetry, and feature gating
-
-## Disclaimer
-
-This is an **unofficial** community resource. It is not affiliated with or endorsed by Anthropic. The documentation is based on source analysis of the publicly distributed CLI bundle and may become outdated as new versions are released. Always refer to [Anthropic's official documentation](https://docs.anthropic.com/en/docs/claude-code) for authoritative guidance.
+- Tool registry and dispatch: `source/src/tools.ts`, `source/src/Tool.ts`, `source/src/services/tools`.
+- CLI flags and startup: `source/src/main.tsx`, `source/src/setup.ts`, `source/src/cli`.
+- Permissions: `source/src/utils/permissions`, `source/src/types/permissions.ts`, `source/src/hooks/useCanUseTool.tsx`.
+- Hooks: `source/src/types/hooks.ts`, `source/src/services/tools/toolHooks.ts`, `source/src/query/stopHooks.ts`, `source/src/commands/hooks`.
+- MCP/channels/plugins: `source/src/services/mcp`, `source/src/plugins`, `source/src/utils/plugins`.
+- Teams/tasks: `source/src/tools/TeamCreateTool`, `source/src/tools/TeamDeleteTool`, `source/src/tools/SendMessageTool`, `source/src/utils/swarm`, `source/src/tasks`.
+- Prompt suggestion/speculation/dream: `source/src/services/PromptSuggestion`, `source/src/services/autoDream`, `source/src/skills/bundled/dream.ts`.
+- Telemetry: `source/src/services/analytics`, `source/src/utils/privacyLevel.ts`, `source/src/cost-tracker.ts`.
