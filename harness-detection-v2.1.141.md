@@ -402,7 +402,7 @@ It reads:
 
 - `CLAUDE_CODE_ENTRYPOINT`;
 - workload from `utils/workloadContext.ts`;
-- optional native client attestation placeholder.
+- optional native client attestation stub.
 
 This header is another outbound surface that records the generic entrypoint, not
 a named harness.

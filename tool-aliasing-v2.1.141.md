@@ -99,3 +99,254 @@ Legacy names remain useful when a config must run against old and new versions.
 - `source/src/utils/messages/systemInit.ts`
 - `source/src/services/tools/toolExecution.ts`
 - `source/src/tools.ts`
+
+## Alias Resolution Algorithm
+
+The resolver is intentionally simple:
+
+```ts
+tool.name === requestedName || tool.aliases?.includes(requestedName)
+```
+
+There is no fuzzy matching, case folding, or pattern matching in
+`toolMatchesName()`. Any compatibility name must be explicitly listed as an
+alias or normalized before lookup.
+
+## Alias Layers
+
+2.1.141 has four separate compatibility layers:
+
+1. Tool object aliases (`aliases` on the tool definition).
+2. Permission-rule legacy normalization.
+3. SDK/system-init compatibility naming.
+4. MCP/builtin name de-duplication.
+
+These solve different problems and should not be conflated.
+
+## Tool Object Aliases
+
+Tool aliases allow runtime lookup by an old name.
+
+Observed:
+
+- `Agent.aliases = ['Task']`
+- `TaskStop.aliases = ['KillShell']`
+- `TaskOutput.aliases = ['AgentOutputTool', 'BashOutputTool']`
+- `SendUserMessage.aliases = ['Brief']`
+
+If a model/tool call emits the legacy name, `findToolByName()` can still resolve
+the intended tool.
+
+## Permission Normalization
+
+Permission parser normalization rewrites legacy names before rule matching:
+
+- `Task` -> `Agent`
+- `KillShell` -> `TaskStop`
+- `AgentOutputTool` -> `TaskOutput`
+- `BashOutputTool` -> `TaskOutput`
+- `Brief` -> `SendUserMessage` where brief support is compiled in.
+
+This affects:
+
+- settings permission rules.
+- `--allowedTools`.
+- `--disallowedTools`.
+- base tools.
+- dangerous-rule stripping in auto mode.
+
+## SDK Compatibility
+
+`sdkCompatToolName()` maps `Agent` to `Task` for SDK-facing system init/tool
+lists. That is a wire compatibility decision, not the internal canonical name.
+
+Consequence:
+
+- internal docs/configs should say `Agent`.
+- SDK consumers may still observe `Task`.
+- hook configs for 2.1.141 should prefer `Agent`.
+
+## Parameter Aliasing Status
+
+The old parameter-aliasing topic should not be treated as a major 2.1.141
+feature. The reconstructed source does not show a broad generic
+`inputParamAliases` mechanism used across native tools.
+
+There are still tool-specific normalization paths, for example:
+
+- `ExitPlanMode` SDK-facing input normalization.
+- provider/API input shaping.
+- MCP schema adaptation.
+- tool-specific validation.
+
+But these are not a general "alias arbitrary input parameter names" facility.
+
+## MCP Name Collision Behavior
+
+MCP tools enter the pool after built-ins. Built-ins win name conflicts.
+
+Collision rules:
+
+- built-in tool name beats MCP tool name.
+- MCP server-prefix deny rules can hide server tools before prompt exposure.
+- no-prefix SDK MCP mode increases collision risk.
+- tool search/deferred schemas do not change canonical identity rules.
+
+Practical advice:
+
+- Do not name MCP tools `Agent`, `Bash`, `Read`, etc.
+- Keep MCP prefixes unless there is a strong SDK compatibility reason.
+- Treat native tool names and aliases as reserved.
+
+## Matcher Examples
+
+Recommended:
+
+```json
+{ "matcher": "Agent" }
+```
+
+Legacy-compatible:
+
+```json
+{ "matcher": "Task" }
+```
+
+Recommended permission rule:
+
+```json
+{ "allow": ["Agent(researcher)"] }
+```
+
+Legacy permission rule that normalizes:
+
+```json
+{ "allow": ["Task(researcher)"] }
+```
+
+For future versions, prefer canonical names because aliases can eventually be
+removed while canonical names are much more stable.
+
+## Dispatch Sites Using Alias Lookup
+
+Alias-aware lookup appears in:
+
+- ordinary tool orchestration.
+- streaming tool executor.
+- direct tool execution.
+- tool search.
+- Agent UI/progress rendering.
+- plan mode checks that need to know if `Agent` is present.
+
+This is why aliases affect more than one code path.
+
+## Complete Alias Table
+
+Concrete 2.1.141 tool aliases found in source:
+
+- canonical `Agent`, alias `Task`.
+- canonical `TaskStop`, alias `KillShell`.
+- canonical `TaskOutput`, aliases `AgentOutputTool` and `BashOutputTool`.
+- canonical `SendUserMessage`, alias `Brief`.
+
+Other alias systems exist in the codebase, but they are not native tool aliases:
+
+- slash command aliases such as `plugin`/`plugins`.
+- shell aliases captured in shell snapshots.
+- model aliases such as `sonnet` and `opus`.
+- keybinding modifier aliases such as `ctrl`/`control`.
+- skill aliases such as `dream`/`learn`.
+- CLI command aliases such as `update`/`upgrade`.
+
+Do not mix these categories. `toolMatchesName()` only applies to tool objects.
+
+## Permission Parser Normalization
+
+The permission rule parser has a legacy-name map. This is separate from
+`toolMatchesName()` and exists so persisted permission rules can migrate:
+
+- `KillShell` normalizes to `TaskStop`.
+- `AgentOutputTool` normalizes to `TaskOutput`.
+- `BashOutputTool` normalizes to `TaskOutput`.
+- `Task` normalizes to `Agent` through the agent alias path.
+- `Brief` normalizes to `SendUserMessage` when brief tooling is compiled.
+
+Normalization is applied when loading settings and when comparing rules. That
+means a settings file can contain an old name while UI/debug output shows the
+canonical name.
+
+## Deprecated Tool Execution Fallback
+
+`toolExecution.ts` contains a specific fallback for deprecated alias calls:
+
+1. runtime cannot find a tool by primary name.
+2. it searches for a tool whose `aliases` include the requested name.
+3. it only uses the fallback if the requested name was an alias, not a primary
+   name miss.
+
+This exists for old transcripts and old SDK callers. It is deliberately narrow
+so typoed tool names do not silently map to unrelated tools.
+
+## Alias Effects by Layer
+
+Model-visible tool schema:
+
+- new sessions should expose canonical names.
+- aliases are not necessarily shown as separate tools.
+- aliases do not duplicate the schema.
+
+Permission rules:
+
+- legacy names normalize.
+- canonical names are preferred for new rules.
+- blanket deny filtering must account for aliases and MCP prefixes.
+
+Hooks:
+
+- tool matchers should use canonical names for new configs.
+- legacy `Task` matchers can still work because `Agent` has an alias.
+- `PreToolUse`, `PostToolUse`, and failure events all depend on tool-name
+  matching.
+
+SDK/print:
+
+- SDK compatibility can emit or accept legacy names in some paths.
+- `systemInit` maps `Agent` to legacy `Task` for older SDK compatibility.
+- new code should treat `Agent` as canonical.
+
+UI:
+
+- progress rendering and agent displays use alias-aware matching where they
+  need to detect an available tool.
+- display labels are still controlled by tool/UI code, not by alias strings.
+
+## Alias Non-Effects
+
+Aliases do not:
+
+- rename input fields.
+- rename output fields.
+- change permissions for a tool once resolved.
+- let an MCP tool shadow a built-in.
+- create a second tool schema.
+- imply slash command aliases.
+- imply shell aliases.
+
+For example, `TaskOutput` accepting `BashOutputTool` as an alias does not mean
+every parameter from an older Bash-output schema is accepted. Parameter
+compatibility is implemented separately where source explicitly normalizes it.
+
+## Source Audit Procedure
+
+For a later release:
+
+1. Search `source/src/tools` for `aliases:`.
+2. Search `Tool.ts` for alias-aware helpers.
+3. Search permission parser files for legacy-name maps.
+4. Search SDK schema/init files for compatibility names.
+5. Search tool execution for alias fallback logic.
+6. Search hooks for matcher behavior.
+7. Search UI and attachment code for `toolMatchesName`.
+8. Separate tool aliases from command/model/skill/keybinding aliases.
+9. Verify canonical names in docs and examples.
+10. Keep legacy names only in migration/compatibility sections.

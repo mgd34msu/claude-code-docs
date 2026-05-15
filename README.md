@@ -44,3 +44,28 @@ Most topic-specific behavior is concentrated in these areas:
 - Teams/tasks: `source/src/tools/TeamCreateTool`, `source/src/tools/TeamDeleteTool`, `source/src/tools/SendMessageTool`, `source/src/utils/swarm`, `source/src/tasks`.
 - Prompt suggestion/speculation/dream: `source/src/services/PromptSuggestion`, `source/src/services/autoDream`, `source/src/skills/bundled/dream.ts`.
 - Telemetry: `source/src/services/analytics`, `source/src/utils/privacyLevel.ts`, `source/src/cost-tracker.ts`.
+
+## Quality Bar for 2.1.141 Docs
+
+The 2.1.141 writeups should be read as source reconstruction notes, not public
+product docs. Each topic is expected to include:
+
+- exact 2.1.141 source areas.
+- feature gates and environment overrides.
+- data schemas or file formats where applicable.
+- lifecycle/flow descriptions.
+- telemetry events.
+- edge cases and failure modes.
+- notes for future release diffing.
+
+The long-form canonical references are:
+
+- `hooks-v2.1.141.md`
+- `agent-view-2.1.141.md`
+- `claude-print-v2.1.141.md`
+- `harness-detection-v2.1.141.md`
+
+The companion topic references now expand the same source-backed style across
+tools, telemetry, feature gates, environment variables, teams, channels, brief
+mode, auto mode, cron, context injection, CLAUDE.md, token accounting, aliases,
+and experimental features.

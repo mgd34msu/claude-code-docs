@@ -154,3 +154,294 @@ Use the smallest context surface that matches the need:
 - `source/src/skills`
 - `source/src/services/mcp`
 - `source/src/bootstrap/state.ts`
+
+## Injection Surface Matrix
+
+2.1.141 context surfaces can be grouped by when they enter the conversation:
+
+- Startup/system prompt: base system prompt, product mode, output style,
+  environment, tools, and feature-gated instructions.
+- Project context load: CLAUDE.md, additional directories, memory directory, and
+  settings-derived context.
+- User prompt preprocessing: prompt hooks, attachments, slash command expansion,
+  and process-user-input behavior.
+- Tool-time context: tool results, hook additional context, MCP resource reads,
+  channel messages, and task notifications.
+- Subagent construction: agent definition, agent frontmatter, MCP requirements,
+  agent memory, skills, and SubagentStart hooks.
+- Background reinjection: task notifications, Agent View transcript reads,
+  scheduled task prompts, dream results, and speculation acceptance.
+
+## System Prompt Inputs
+
+System prompt construction depends on:
+
+- main product prompt text.
+- current date/environment.
+- tool set.
+- permission mode.
+- brief/Kairos state.
+- output style.
+- model/provider decisions.
+- feature-gated instruction sections.
+- simple/bare mode.
+- memory/context availability.
+
+The system prompt is also cache-sensitive. Subagents can reuse a rendered parent
+system prompt to preserve prompt-cache compatibility.
+
+## CLAUDE.md and Memory Files
+
+CLAUDE.md is loaded through the context system, but can be disabled or reduced.
+
+Controls:
+
+- `CLAUDE_CODE_DISABLE_CLAUDE_MDS`
+- `CLAUDE_CODE_SIMPLE`
+- additional directories passed by CLI/options.
+- project trust and working directory.
+- memory-related runtime gates.
+
+Important distinction:
+
+- CLAUDE.md is static context.
+- hooks are dynamic context.
+- skills are conditional procedural context.
+- agent definitions are role-specific context.
+
+Do not put everything into CLAUDE.md just because it is available.
+
+## Agent Definition Injection
+
+Agent definitions can inject:
+
+- role description.
+- system prompt.
+- allowed/disallowed tool lists.
+- model override.
+- effort.
+- color/background UI metadata.
+- memory policy.
+- isolation policy.
+- max turns.
+- hooks.
+- MCP server requirements.
+- skills.
+
+The `Agent` tool filters definitions by MCP availability and permission denial
+before presenting them in prompt text.
+
+## Subagent Context Construction
+
+`runAgent()` builds subagent execution context from:
+
+- selected agent definition.
+- inherited/cached parent prompt state.
+- tool permission context.
+- agent-specific tool filter.
+- additional context from `SubagentStart`.
+- preloaded skills.
+- agent memory prompts.
+- MCP server scope.
+- output style/system prompt modifiers.
+
+Subagents do not simply receive a raw copy of the parent conversation. The
+context is reconstructed for the agent role and tool set.
+
+## Hook Context Injection
+
+Hook output can include `additionalContext` for supported events. Important
+cases:
+
+- `UserPromptSubmit`: inject before the prompt becomes a model turn.
+- `PreToolUse`: inject around tool-use decision/execution.
+- `PostToolUse`: inject after a tool succeeds.
+- `PostToolUseFailure`: inject after a tool fails.
+- `SubagentStart`: inject into a subagent.
+- `Stop`: force/continue behavior at turn end.
+
+The full per-event schema is in `hooks-v2.1.141.md`.
+
+## MCP Context
+
+MCP can affect context through:
+
+- tool schemas.
+- tool results.
+- resources read by `ReadMcpResourceTool`.
+- server prompts.
+- elicitation requests.
+- plugin-defined hooks.
+- channel notifications.
+
+MCP channels are special because they inject external inbound user messages,
+not just tool results.
+
+## Skills and Output Styles
+
+Skills:
+
+- bundled/user/project/plugin sources.
+- invoked through `Skill`.
+- searchable/deferred through skill tooling.
+- can carry large procedural instructions without always loading them.
+
+Output styles:
+
+- loaded from output style directories and plugins.
+- modify response style.
+- may keep or replace default coding instructions.
+- can be forced by plugin metadata.
+
+## Teams, Tasks, and Background Context
+
+Teams inject context through:
+
+- team task lists.
+- teammate messages.
+- plan approval messages.
+- shutdown messages.
+- task notifications.
+- teammate transcripts.
+
+Background agents inject context when:
+
+- a task notification is enqueued.
+- `TaskOutput` is read.
+- Agent View opens a transcript.
+- a background agent completes/fails/is killed.
+
+## Precedence and Conflict Guidance
+
+If instructions conflict, prefer the most specific trusted surface:
+
+- explicit current user prompt over persistent memory.
+- agent definition over general CLAUDE.md for that subagent.
+- managed policy over local settings.
+- hook-injected current context over stale memory when the hook is trusted.
+- tool result facts over speculative instructions.
+
+Avoid duplicating the same rule across CLAUDE.md, hooks, skills, and agent
+definitions. Duplication makes later diffs and prompt-cache behavior harder to
+reason about.
+
+## Injection Timeline
+
+The 2.1.141 context timeline is roughly:
+
+1. process starts and entrypoint/session variables are set.
+2. settings and managed policy load.
+3. workspace trust and project context resolve.
+4. CLAUDE.md and additional directories are discovered unless disabled.
+5. system prompt sections are assembled.
+6. tools are assembled and filtered.
+7. skills, agents, commands, plugins, and MCP resources are discovered.
+8. attachments and memories are selected for a turn.
+9. hooks can inject additional context at lifecycle boundaries.
+10. background task notifications and tool results append context during the
+    conversation.
+
+Some steps run once at startup, some run every turn, and some are deferred until
+after trust or idle time.
+
+## System Prompt Versus Message Context
+
+Context can enter as:
+
+- system prompt sections.
+- system reminders inside the message stream.
+- user messages.
+- assistant/tool result messages.
+- hidden synthetic messages.
+- hook `additionalContext`.
+- task notifications.
+- SDK-provided system prompt overrides.
+
+This distinction matters for prompt-cache behavior. Changing early system prompt
+bytes can invalidate the whole cached prefix, while appending a system reminder
+later can preserve more of the cache.
+
+## CLAUDE.md Disable and Add-Dir Controls
+
+CLAUDE.md loading is affected by:
+
+- `CLAUDE_CODE_DISABLE_CLAUDE_MDS`.
+- `CLAUDE_CODE_SIMPLE`/bare mode.
+- explicit `--add-dir`.
+- `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD`.
+- workspace trust.
+- project root and original cwd.
+- import/size limits in CLAUDE.md processing.
+
+If an instruction is missing, check disable/env state before assuming the file
+was parsed incorrectly.
+
+## Agent Definition Context
+
+Agent definitions can inject context through frontmatter and body content:
+
+- `name`
+- `description`
+- `tools`
+- `model`
+- `background`
+- `color`
+- `memory`
+- `isolation`
+- `effort`
+- `permissionMode`
+- `maxTurns`
+- `disallowedTools`
+- `hooks`
+- MCP tool references.
+- skills.
+
+Subagents do not simply inherit all parent context unchanged. The agent runtime
+constructs a child context with its own definition, tool policy, and optional
+cache-sharing parameters.
+
+## Hook Context Safety
+
+Hooks can inject additional context, but this is one of the easiest ways to
+damage prompt quality:
+
+- hook context should be current.
+- hook context should be concise.
+- hook context should identify provenance.
+- hook context should not contain secrets.
+- hook context should not duplicate large files.
+- hook context should not contradict the current user prompt.
+
+Hook stdout and hook JSON output are different. Only the structured output fields
+intended for context should be treated as model-facing context.
+
+## MCP and Plugin Context
+
+MCP and plugins inject context through several surfaces:
+
+- tool schemas.
+- resource lists.
+- resource contents.
+- commands.
+- plugin instructions.
+- MCP channels.
+- permission relay text.
+- marketplace/plugin metadata.
+
+MCP availability can change after startup. Deferred MCP resource prefetch and
+reconnect behavior mean context can evolve during a session.
+
+## Future Diff Checklist
+
+For later releases:
+
+1. Inspect `context.ts` and `constants/prompts.ts`.
+2. Inspect CLAUDE.md loader and import handling.
+3. Inspect agent loader/frontmatter parser.
+4. Inspect hook schemas and execution.
+5. Inspect skills loader and bundled skill registry.
+6. Inspect MCP client resource/tool registration.
+7. Inspect plugin loader instruction surfaces.
+8. Inspect memory and relevant-memory prefetch.
+9. Inspect task notification message builders.
+10. Inspect SDK/print system prompt override handling.
