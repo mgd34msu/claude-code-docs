@@ -810,3 +810,134 @@ To investigate a new harness integration in this source, check these surfaces:
   general agent harnesses.
 - No literal Hermes/OpenClaw detector was found in the reconstructed 2.1.141
   source.
+
+## Deep 2.1.141 Harness Boundary Addendum
+
+The source scan shows no single "harness detector" abstraction for arbitrary
+third-party wrappers. Detection is distributed across entrypoint labels,
+transport choices, SDK control initialization, IDE discovery, CI/terminal
+environment checks, and remote/bridge state.
+
+### Negative Literal Scan
+
+The 2.1.141 reconstructed source contains no positive literal match for:
+
+- `Hermes`.
+- `hermes`.
+- `OpenClaw`.
+- `openclaw`.
+
+That does not mean those harnesses cannot run Claude Code. It means 2.1.141 does
+not appear to contain a named special-case detector for them. If a harness is
+recognized, it is recognized through a generic protocol or environment surface.
+
+### Primary Generic Harness Surfaces
+
+The strongest external harness indicators are:
+
+- `--sdk-url`, which enables remote WebSocket SDK I/O and forces stream-json print mode.
+- `CLAUDE_AGENT_SDK_CLIENT_APP`, which names the SDK consumer application.
+- `CLAUDE_AGENT_SDK_VERSION`, which names the SDK version.
+- `CLAUDE_CODE_ENTRYPOINT`, which labels process role such as `sdk-ts`, `daemon`, `daemon-worker`, or `local-agent`.
+- stream-json input/output framing.
+- SDK `initialize` control request fields for hooks, MCP servers, JSON schema, system prompts, agents, prompt suggestions, and agent progress summaries.
+- SDK control requests such as `can_use_tool`, `set_permission_mode`, `set_model`, `set_max_thinking_tokens`, `mcp_status`, `get_context_usage`, `mcp_set_servers`, `reload_plugins`, and elicitation handling.
+
+These are protocol-level signals. They are safer to rely on than terminal or
+process-name heuristics.
+
+### Entrypoint Labels
+
+`core/Session.ts` defaults `CLAUDE_CODE_ENTRYPOINT` to `sdk-ts` for SDK-created
+sessions when the caller has not provided one. `main.tsx` checks
+`CLAUDE_CODE_ENTRYPOINT !== 'local-agent'` before initializing some built-in
+plugin behavior. Daemon workers explicitly set `CLAUDE_CODE_ENTRYPOINT` to
+daemon-related values when they spawn children.
+
+This makes `CLAUDE_CODE_ENTRYPOINT` a role label, not a vendor label. A future
+release map should track every write and read of this variable before claiming
+new harness detection.
+
+### SDK Control Handshake
+
+`entrypoints/sdk/controlSchemas.ts` defines the SDK initialize request. It can
+carry:
+
+- hook callback matchers.
+- SDK MCP server names.
+- JSON schema.
+- system prompt and append-system-prompt values.
+- agent definitions.
+- prompt suggestion enablement.
+- agent progress summary enablement.
+
+The initialize response returns commands, agents, output style, available output
+styles, models, account info, optional PID, and fast-mode state. This is the
+main handshake that lets an external harness discover capabilities without
+parsing terminal UI.
+
+### Permission Harnessing
+
+When `--sdk-url` is present, print mode always uses `stdio` permission prompting
+so the SDK host can handle tool permission decisions. The request schema carries
+tool name, input, suggestions, blocked path, decision reason, title, display
+name, tool-use id, optional agent id, and description. The remote-harness side
+can also set permission mode through the `set_permission_mode` control request.
+
+This is a substantial harness boundary. A wrapper that only launches `claude -p`
+without the SDK protocol will not receive the same permission delegation surface.
+
+### IDE And Editor Detection
+
+The source contains extensive IDE detection and integration code for editor
+hosts. These signals are about editor availability, diagnostics, file context,
+and UI integration, not generic agent harness ownership. Relevant families
+include VS Code, Cursor, Windsurf, JetBrains, terminal app ids, and IDE MCP
+clients.
+
+When documenting harnesses, keep these separate:
+
+- "editor integration detected" means Claude can talk to an IDE/editor surface.
+- "SDK harness detected" means Claude is running under an SDK/control protocol.
+- "remote bridge active" means Claude is connected to claude.ai/CCR or a remote-control session.
+- "CI/non-interactive" means terminal interactivity/trust/setup behavior changes.
+
+### Bridge And Remote Control
+
+`main.tsx`, `bridge/*`, `cli/transports/*`, and `daemon/*` add remote surfaces:
+
+- `--remote` creates or attaches to Claude Code Web sessions.
+- `--remote-control` and `--rc` enable always-on bridge sessions when gated.
+- `--sdk-url` uses remote WebSocket endpoint streaming.
+- CCR transport registers workers, reports worker state, heartbeats, emits worker events, and handles delivery acknowledgments.
+- bridge state appears in `AppState` as connection status, URLs, IDs, and permission callbacks.
+
+These are not named third-party harness detectors. They are remote-execution
+protocols that third-party systems could use if they speak the expected
+protocol.
+
+### CI And Non-Interactive Classification
+
+Non-interactive mode is inferred from `--print`, stream formats, stdin/stdout
+TTY state, and explicit flags. The interactive setup code notes that non-
+interactive sessions never reach some setup screens. The `-p` help text warns
+that workspace trust UI is skipped in non-interactive mode.
+
+CI/deployment variables also influence runtime behavior in other parts of the
+source, but they do not identify a named harness. They should be documented as
+environment classification, not as app detection.
+
+### Practical Future Scan
+
+For later releases, use this order:
+
+1. Search for literal third-party names.
+2. Search `CLAUDE_AGENT_SDK_*` and `CLAUDE_CODE_ENTRYPOINT`.
+3. Inspect `main.tsx` option extraction for new hidden protocol flags.
+4. Inspect SDK `controlSchemas.ts` and `coreSchemas.ts`.
+5. Inspect `cli/print.ts` control-message handling.
+6. Inspect `cli/transports/*` for new worker metadata.
+7. Inspect `bridge/*` and `daemon/*`.
+8. Inspect IDE discovery and terminal environment detectors.
+9. Inspect analytics metadata fields that might classify client/harness type.
+10. Only call a detector named if source has a literal or canonical enum value for it.

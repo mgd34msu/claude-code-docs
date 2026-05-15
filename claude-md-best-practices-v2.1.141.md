@@ -385,3 +385,121 @@ A good 2.1.141 CLAUDE.md should pass these checks:
 8. It explains non-obvious repo conventions.
 9. It is stable across ordinary commits.
 10. It improves model behavior in a way a reviewer can observe.
+
+## Deep 2.1.141 CLAUDE.md Loader Addendum
+
+The 2.1.141 loader treats CLAUDE.md as one source in a broader memory/context
+system. A good CLAUDE.md should be written for that loader behavior, not for a
+generic markdown reader.
+
+### Loader Controls
+
+The main controls are:
+
+- `CLAUDE_CODE_DISABLE_CLAUDE_MDS`: hard disables CLAUDE.md loading.
+- `CLAUDE_CODE_SIMPLE=1` from `--bare`: skips automatic discovery unless explicit `--add-dir` directories exist.
+- `--add-dir`: explicitly adds directories whose CLAUDE.md files can be loaded.
+- trust/setup gates: prevent some startup work from executing before trust is established.
+- memory filtering: removes injected memory files that should not be duplicated.
+
+In other words, `--bare` means "only context I asked for," not "never load any
+CLAUDE.md under any condition."
+
+### Placement Strategy
+
+Use CLAUDE.md for stable project rules:
+
+- build commands.
+- test commands.
+- lint commands.
+- generated-file rules.
+- source/reconstruction boundaries.
+- vendored directory policy.
+- release/version notes that do not change daily.
+- naming conventions.
+- known high-risk workflows.
+
+Do not use it for volatile state:
+
+- "currently debugging X."
+- "PR #N is pending."
+- temporary branch status.
+- secrets or credentials.
+- long pasted logs.
+- issue trackers that will go stale.
+- code snippets better kept in source.
+
+The loader caches CLAUDE.md content for the session and also exposes it to the
+auto-mode classifier. Stale operational notes can therefore influence both
+model behavior and permission automation.
+
+### Imports And Scope
+
+The loader supports multiple memory files and import-style composition. The
+best practice is to keep imports shallow and purpose-specific:
+
+- one high-level project CLAUDE.md.
+- optional focused docs for build/test, architecture, generated files, or release process.
+- avoid deep chains that require model effort to reconcile.
+- avoid imports into large generated or vendored trees.
+- avoid importing files that frequently change.
+
+For future release maps, inspect `utils/claudemd.ts` and
+`utils/markdownConfigLoader.ts` before documenting exact import syntax or search
+order. The source has careful canonical-root and nested-repository handling, so
+older assumptions can be wrong.
+
+### Content That Helps The Model
+
+A high-value CLAUDE.md section is concrete and executable:
+
+- `Run tests with: bun test packages/foo`.
+- `Generated files live in src/generated; edit the generator instead.`
+- `Do not modify vendor/aws-sdk except when updating vendored SDK code.`
+- `Use apply_patch for hand edits.`
+- `Source reconstruction for this repo must use version-local cli.js only.`
+
+Low-value content is vague:
+
+- "write good code."
+- "be careful."
+- "follow best practices."
+- "ask if unsure."
+
+The loader provides limited context budget. Every vague sentence competes with
+tool schemas, git status, memory, hooks, and MCP context.
+
+### Interaction With Auto Mode
+
+`getUserContext()` caches CLAUDE.md content for the auto-mode classifier. That
+means project instructions can influence whether an action is considered safe
+or dangerous in auto mode. Best practices:
+
+- document legitimate generated-file writes clearly.
+- name test/build commands exactly.
+- identify directories that are safe outputs.
+- identify directories that must not be edited.
+- do not include broad permission-like statements such as "you may run anything."
+
+### Interaction With Hooks
+
+Hooks can observe `InstructionsLoaded`, `CwdChanged`, `FileChanged`, and other
+events. A CLAUDE.md update can therefore trigger downstream automation in
+projects that configure such hooks. Keep CLAUDE.md parseable and stable to
+avoid noisy automation.
+
+### Review Template
+
+For this 2.1.141 source tree, a strong CLAUDE.md review should ask:
+
+- Does it say which version/source directory is authoritative?
+- Does it forbid copying code from non-authoritative versions unless explicitly mapping a perfect match?
+- Does it identify generated map/source-map artifacts?
+- Does it distinguish vendored source from first-party source?
+- Does it document scripts that verify extraction completeness?
+- Does it name doc output locations and commit/push expectations?
+- Does it avoid anger-driven or process-specific notes that will mislead future sessions?
+
+The goal is not to make CLAUDE.md huge. The goal is to make it load-bearing:
+small enough to fit, concrete enough to change behavior, and stable enough to
+survive ordinary development.

@@ -524,3 +524,176 @@ For later versions, review:
 8. managed settings enforcement.
 9. telemetry events around auto-mode toggles and classifier decisions.
 10. tests for alias/function/safety-check bypass behavior.
+
+## Deep 2.1.141 Auto Mode Reconstruction
+
+The auto-mode implementation in 2.1.141 is not just a permission mode label.
+It is a composition of mode resolution, a runtime gate, dangerous-rule
+stripping, a classifier query source, prompt caching, and tool-level
+permission hooks.
+
+### Source Map
+
+| Concern | Source |
+| --- | --- |
+| Mode list and display config | `source/src/types/permissions.ts`, `source/src/utils/permissions/PermissionMode.ts` |
+| Startup mode resolution | `source/src/utils/permissions/permissionSetup.ts` |
+| Dangerous permission detection | `source/src/utils/permissions/permissionSetup.ts`, `dangerousPatterns.ts` |
+| Auto-mode active state | `source/src/utils/permissions/autoModeState.ts`, bootstrap state helpers |
+| Classifier prompt build | `source/src/utils/permissions/yoloClassifier.ts` |
+| Classifier response parsing | `source/src/utils/permissions/classifierShared.ts`, `yoloClassifier.ts` |
+| Tool execution integration | `source/src/services/tools/toolExecution.ts` |
+| Permission decision integration | `source/src/hooks/useCanUseTool.tsx`, `source/src/utils/permissions/permissions.ts` |
+| CLI and hidden commands | `source/src/main.tsx` |
+| Opt-in dialog | `source/src/components/AutoModeOptInDialog.tsx` |
+
+### Mode Resolution
+
+`initialPermissionModeFromCLI()` builds an ordered candidate list:
+
+1. `--dangerously-skip-permissions` maps to `bypassPermissions`.
+2. `--permission-mode <mode>` is parsed with `permissionModeFromString()`.
+3. `settings.permissions.defaultMode` is considered if present.
+4. Invalid or disabled candidates are skipped.
+5. If no candidate survives, mode falls back to `default`.
+
+Auto mode is special in that the mode can be parsed but still skipped if the
+cached auto-mode availability state says the circuit breaker is disabled.
+Remote CCR mode also filters unsupported settings default modes so remote
+environments cannot silently inherit unsafe local defaults.
+
+### Activation Paths
+
+| Path | Source behavior |
+| --- | --- |
+| `--permission-mode auto` | Requests auto directly through CLI parsing. |
+| Deprecated `--enable-auto-mode` | Still carried as intent and used around setup/verification. |
+| `settings.permissions.defaultMode = "auto"` | Honored only when the auto gate is available. |
+| Prompt/input mode cycling | Transition uses `transitionPermissionMode()` so side effects match CLI activation. |
+| Plan with auto active | Plan mode can retain auto classifier state through `isAutoModeActive()`. |
+
+The dialog path is separate from final availability. The opt-in UI can be
+shown based on user state and cached gate state, but `verifyAutoModeGateAccess`
+and transition checks still decide whether the session can actually enter auto.
+
+### Permission Transition Side Effects
+
+`transitionPermissionMode()` centralizes side effects:
+
+| Transition | Side effects |
+| --- | --- |
+| Enter plan | Saves pre-plan context through plan-mode helpers. |
+| Leave plan | Marks that plan mode has been exited and clears `prePlanMode` if needed. |
+| Enter auto | Verifies gate, sets auto active, strips dangerous rules. |
+| Leave auto | Clears auto active, sets an exit attachment flag, restores stripped dangerous rules. |
+| Plan with active auto | Treated as using the classifier for leaving-side logic. |
+
+This is why a doc should not describe auto mode as "just default mode plus
+classifier." The mode transition mutates the in-memory permission context by
+removing rules that would defeat the classifier.
+
+### Dangerous Rule Stripping
+
+Auto mode strips allow rules that would bypass classifier review:
+
+| Rule class | Why it is dangerous |
+| --- | --- |
+| `Bash` with no content or wildcard | Allows every shell command. |
+| Bash interpreter prefixes | Allows arbitrary code through `python`, `node`, `ruby`, `perl`, shell wrappers, and related patterns. |
+| PowerShell wildcard or code-exec commands | Allows nested shells, `Invoke-Expression`, `Start-Process`, `Add-Type`, COM object creation, and aliases. |
+| `Agent` allow rules | Auto-approves delegation before the subagent prompt can be classified. |
+| Ant-only `Tmux` allow rules | `send-keys` style behavior can execute shell content outside classifier visibility. |
+
+Stripped rules are stashed in `strippedDangerousRules` and restored on exit
+from auto. Only update-capable sources are persisted through removal/restore
+logic; other sources can be skipped for persistence but still affect warnings.
+
+### Classifier Prompt Build
+
+`yoloClassifier.ts` builds the classifier prompt from:
+
+| Input | Role |
+| --- | --- |
+| Base auto-mode system prompt | Common classifier instructions. |
+| External permissions template | Default external rules and user-replaceable sections. |
+| Anthropic permissions template | Internal template when `USER_TYPE=ant` and external forcing is not enabled. |
+| `settings.autoMode.allow` | User allow rules replacing or extending template sections depending on template type. |
+| `settings.autoMode.soft_deny` | User soft-deny rules. |
+| `settings.autoMode.hard_deny` | User hard-deny rules. |
+| `settings.autoMode.environment` | User environment notes. |
+| Bash classifier rule descriptions | Included for internal template paths when the Bash classifier feature is active. |
+| Cached CLAUDE.md content | Added as a delimited user configuration message when present. |
+
+External defaults are parsed out of template tags for the hidden
+`auto-mode defaults` command. User settings replace defaults in the external
+template but are additive in the Anthropic template.
+
+### Transcript Projection
+
+The classifier does not see the full conversation in the same form as the main
+agent. It projects the transcript into compact entries:
+
+| Conversation item | Classifier projection |
+| --- | --- |
+| User text | User text line or JSONL `user` record. |
+| Queued user command attachment | User text extracted from queued command prompt. |
+| Assistant text | Excluded to avoid model-authored content influencing the classifier. |
+| Assistant tool use | Serialized through each tool's `toAutoClassifierInput()`. |
+| Tool use with empty classifier input | Skipped. |
+| Malformed historical tool input | Falls back to raw input and emits telemetry. |
+
+The currently classified action is appended with cache control. This creates a
+stable cached prefix for two-stage classifier calls while keeping the changing
+action at the end.
+
+### Two-Stage Classifier
+
+2.1.141 supports XML two-stage classification when enabled:
+
+| Mode | Behavior |
+| --- | --- |
+| `both` | Stage 1 fast decision first. If Stage 1 allows, return immediately. If it blocks or is unclear, run Stage 2. |
+| `fast` | Stage 1 only, with larger token budget and no stop sequence so reason text can appear. |
+| `thinking` | Stage 2 only. |
+
+Stage 1 is a short max-token, stop-sequence path that asks for immediate
+`<block>yes/no</block>`. Stage 2 uses a larger budget and explicit process
+reminder. Parsing strips `<thinking>` before looking for `<block>` or
+`<reason>`, so tags inside reasoning do not create false matches.
+
+### Failure Behavior
+
+The classifier fails closed:
+
+| Failure | Result |
+| --- | --- |
+| Abort signal | Blocks with unavailable/interrupted reason. |
+| Parse failure | Blocks and records parse failure telemetry. |
+| Policy refusal | Blocks with policy-refusal failure mode. |
+| Prompt too long | Blocks with transcript-too-long reason and token metadata. |
+| API/network error before Stage 1 usage | Blocks as classifier unavailable. |
+| API/network error after Stage 1 usage | Blocks based on Stage 1 assessment and marks Stage 2 unavailable. |
+| Tool declares no classifier-relevant input | Allows with "no classifier-relevant input" reason. |
+
+The source also writes session-scoped error prompt dumps under the Claude temp
+directory so sharing/diagnostic flows can collect classifier context.
+
+### Telemetry
+
+Important auto-mode event families in 2.1.141 include:
+
+| Event | Source meaning |
+| --- | --- |
+| `tengu_auto_mode_outcome` | Classifier success, error, parse failure, interruption, transcript-too-long. |
+| `tengu_auto_mode_decision` | Permission decision or subagent handoff decision metadata. |
+| `tengu_auto_mode_malformed_tool_input` | Historical tool input could not be projected normally. |
+| `tengu_auto_mode_opt_in_dialog_shown` | Opt-in dialog shown. |
+| `tengu_auto_mode_opt_in_dialog_accept` | User accepted auto for session. |
+| `tengu_auto_mode_opt_in_dialog_accept_default` | User accepted auto as default. |
+| `tengu_auto_mode_opt_in_dialog_decline` | User declined. |
+| `tengu_auto_mode_subsequent_approval` | Subsequent approval behavior in permission path. |
+| `tengu_auto_mode_denial_limit_exceeded` | Denial-limit safety behavior. |
+
+Telemetry records classifier type, model, stage request ids/message ids,
+duration, usage, and token divergence metrics where available. It deliberately
+uses categorical metadata and measured counts rather than raw prompts.

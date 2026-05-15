@@ -1,316 +1,2280 @@
-# Claude Code Hooks in 2.1.141
+# Claude Hooks Reference in 2.1.141
 
-The full 2.1.141 hooks writeup is `hooks-v2.1.141.md`. This file exists as the
-versioned companion for the older `claude-hooks-reference-*` docs and summarizes
-the 2.1.141 source shape.
+This document describes the hook system present in the local 2.1.141
+reconstruction at `/home/buzzkill/Projects/lab/cc-linux-141`. It is based on
+the reconstructed local source, especially:
 
-## Hook System Shape
-
-Hooks are configured through settings and plugin-provided configuration, then
-executed by the hook runtime under:
-
+- `source/src/utils/hooks.ts`
+- `source/src/schemas/hooks.ts`
 - `source/src/types/hooks.ts`
+- `source/src/entrypoints/sdk/coreTypes.ts`
+- `source/src/entrypoints/sdk/coreSchemas.ts`
+- `source/src/utils/hooks/hooksConfigManager.ts`
+- `source/src/utils/hooks/hooksSettings.ts`
+- `source/src/utils/hooks/hooksConfigSnapshot.ts`
+- `source/src/utils/hooks/sessionHooks.ts`
+- `source/src/utils/hooks/AsyncHookRegistry.ts`
+- `source/src/utils/hooks/execPromptHook.ts`
+- `source/src/utils/hooks/execAgentHook.ts`
+- `source/src/utils/hooks/execHttpHook.ts`
+- `source/src/utils/hooks/fileChangedWatcher.ts`
+- `source/src/utils/plugins/loadPluginHooks.ts`
+- `source/src/utils/sessionStart.ts`
+- `source/src/utils/processUserInput/processUserInput.ts`
 - `source/src/services/tools/toolHooks.ts`
 - `source/src/query/stopHooks.ts`
-- `source/src/commands/hooks`
-- `source/src/utils/hooks`
+- `source/src/services/mcp/elicitationHandler.ts`
+- `source/src/utils/worktree.ts`
 
-The system supports command hooks, prompt hooks, agent hooks, HTTP hooks, and
-internal non-configurable hooks.
+The scope here is user-facing and integration-facing hooks, not React hooks.
+Where a type appears in generated SDK schemas but is not visibly dispatched by
+the reconstructed runtime, this writeup calls that out explicitly.
 
-## Important Event Families
+## Executive summary
 
-The 2.1.141 hook list includes tool, prompt, session, compact, permission,
-subagent, teammate, task, worktree, config, and elicitation events. Events
-covered in detail in the full writeup include:
+Claude Code 2.1.141 has a broad hook system centered on the `hooks` setting.
+Hooks are configured by event name. Each event contains matcher blocks. Each
+matcher contains one or more hook actions.
+
+The runtime-supported settings/plugin/session hook events in the reconstructed
+source are:
+
+1. `PreToolUse`
+2. `PostToolUse`
+3. `PostToolUseFailure`
+4. `PermissionDenied`
+5. `Notification`
+6. `UserPromptSubmit`
+7. `SessionStart`
+8. `SessionEnd`
+9. `Stop`
+10. `StopFailure`
+11. `SubagentStart`
+12. `SubagentStop`
+13. `PreCompact`
+14. `PostCompact`
+15. `PermissionRequest`
+16. `Setup`
+17. `TeammateIdle`
+18. `TaskCreated`
+19. `TaskCompleted`
+20. `Elicitation`
+21. `ElicitationResult`
+22. `ConfigChange`
+23. `WorktreeCreate`
+24. `WorktreeRemove`
+25. `InstructionsLoaded`
+26. `CwdChanged`
+27. `FileChanged`
+
+There are also two command-driven customization surfaces implemented through
+the same command-execution machinery, but not through the `hooks` map:
+
+- `statusLine`
+- `fileSuggestion`
+
+The hook action types exposed by the reconstructed settings schema are:
+
+- `command`: run a shell command and feed the hook input JSON on stdin.
+- `prompt`: ask a small model to evaluate a boolean condition.
+- `agent`: run an agentic verifier that can inspect the workspace and return
+  structured output.
+- `http`: POST the hook input JSON to a configured URL and parse JSON response.
+
+Internal code also supports:
+
+- `callback`: in-process SDK or built-in callback hooks.
+- `function`: in-process session-scoped boolean hooks, mainly used to enforce
+  structured output in agent/prompt flows.
+
+Hooks are powerful because they can:
+
+- Block or allow tool use.
+- Modify tool input before a tool runs.
+- Add context to the conversation.
+- Modify MCP tool output after a tool runs.
+- Enforce stop conditions before Claude ends a turn.
+- Respond to MCP elicitations.
+- Observe settings, skill, file, cwd, worktree, compaction, and notification
+  events.
+- Register dynamic file watch paths.
+- Populate `CLAUDE_ENV_FILE` for environment changes consumed by later bash
+  commands.
+
+## Basic configuration shape
+
+Hooks live under `hooks` in settings:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/pretool.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npm run format --silent",
+            "if": "Write(*.ts)",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The schema for each event is:
+
+```ts
+Partial<Record<HookEvent, HookMatcher[]>>
+```
+
+Each `HookMatcher` is:
+
+```ts
+{
+  matcher?: string
+  hooks: HookCommand[]
+}
+```
+
+Each hook command is one of:
+
+```ts
+CommandHook | PromptHook | AgentHook | HttpHook
+```
+
+## Configuration sources
+
+Hooks can come from multiple sources:
+
+- User settings: `~/.claude/settings.json`
+- Project settings: `.claude/settings.json`
+- Local project settings: `.claude/settings.local.json`
+- Managed/policy settings
+- Plugin hooks
+- Skill frontmatter hooks
+- Agent frontmatter hooks
+- SDK callback hooks
+- Temporary in-memory session hooks
+- Built-in internal callbacks
+
+The UI for `/hooks` is read-only in 2.1.141. It displays configured hooks and
+their sources, but users edit settings files directly or ask Claude to update
+settings.
+
+Plugin hooks use the same format as settings hooks. Plugin hook configs can
+come from `hooks/hooks.json` or plugin manifest hook declarations. When plugin
+hooks run, command hooks receive plugin-specific substitutions and environment
+variables.
+
+Skill and agent frontmatter hooks are registered as session hooks. They are
+temporary and in-memory. For agent frontmatter, `Stop` hooks are converted to
+`SubagentStop`, because subagents fire `SubagentStop` rather than top-level
+`Stop`.
+
+## Security and policy gates
+
+Hooks execute arbitrary code, so the runtime applies several gates.
+
+### Workspace trust
+
+All hooks require workspace trust in interactive mode. If the workspace trust
+dialog has not been accepted, hooks are skipped. Non-interactive SDK sessions
+treat trust as implicit.
+
+### `CLAUDE_CODE_SIMPLE`
+
+If `CLAUDE_CODE_SIMPLE` is truthy, hook execution returns early.
+
+### Bare mode
+
+Session startup/setup paths explicitly skip hook work in bare mode.
+
+### `disableAllHooks`
+
+`disableAllHooks` affects hooks and the command-backed `statusLine` and
+`fileSuggestion` surfaces.
+
+If `disableAllHooks` is set in managed/policy settings, all hooks are disabled,
+including managed hooks.
+
+If `disableAllHooks` is set in non-managed settings, non-managed hooks are
+disabled but managed hooks can still run. Runtime code treats this as
+managed-only mode.
+
+### `allowManagedHooksOnly`
+
+If managed settings set `allowManagedHooksOnly: true`, only managed hooks run.
+User, project, local, plugin, and session hooks are skipped or hidden.
+
+### `strictPluginOnlyCustomization`
+
+Managed settings can restrict customizations by surface. When the `hooks`
+surface is restricted, user/project/local hooks are blocked and policy hooks
+remain. Plugin hooks are handled separately by plugin policy.
+
+### HTTP hook policy
+
+HTTP hooks have additional network controls:
+
+- `allowedHttpHookUrls`: optional allowlist of URL patterns. `undefined` means
+  unrestricted, `[]` means block all, non-empty means target URL must match.
+- `httpHookAllowedEnvVars`: optional allowlist of environment variables that
+  HTTP hooks may interpolate into headers.
+- SSRF guard blocks private/link-local/non-routable target IP ranges. Loopback
+  is allowed for local dev hooks.
+- If a sandbox network proxy or environment proxy is active, target DNS is
+  performed by the proxy and the direct SSRF lookup guard is skipped.
+- Redirects are disabled (`maxRedirects: 0`).
+
+## Hook action types
+
+### `command`
+
+A command hook runs an external command. The hook input JSON is written to the
+command's stdin, followed by a newline.
+
+Schema fields in the reconstructed source:
+
+```json
+{
+  "type": "command",
+  "command": "string",
+  "if": "optional permission-rule filter",
+  "shell": "bash | powershell",
+  "timeout": 30,
+  "statusMessage": "optional spinner text",
+  "once": false,
+  "async": false,
+  "asyncRewake": false
+}
+```
+
+Important behavior:
+
+- Default timeout is 10 minutes unless a caller supplies a smaller cap.
+- `timeout` is in seconds.
+- Default shell is the hook shell provider default, effectively bash unless
+  configured otherwise.
+- `shell: "powershell"` uses `pwsh` or `powershell` with `-NoProfile
+  -NonInteractive -Command`.
+- Bash hooks run through a shell. On Windows, bash hooks use Git Bash.
+- PowerShell hooks skip bash-only path conversion, `.sh` auto-prefixing,
+  `CLAUDE_CODE_SHELL_PREFIX`, and `CLAUDE_ENV_FILE`.
+- Command hooks receive `CLAUDE_PROJECT_DIR`.
+- Plugin command hooks receive `CLAUDE_PLUGIN_ROOT`; if the plugin has an ID,
+  they also receive `CLAUDE_PLUGIN_DATA`.
+- Plugin user config values are exposed as
+  `CLAUDE_PLUGIN_OPTION_<SANITIZED_KEY>`.
+- Skill hooks use `CLAUDE_PLUGIN_ROOT` for the skill root as well.
+- `SessionStart`, `Setup`, `CwdChanged`, and `FileChanged` bash command hooks
+  may receive `CLAUDE_ENV_FILE`.
+
+Exit-code behavior is event dependent, but the common rule is:
+
+- Exit `0`: success.
+- Exit `2`: blocking feedback for events that support blocking.
+- Other non-zero: non-blocking error shown/logged to the user.
+
+Command hooks may output plain text or JSON. If stdout begins with `{`, Claude
+tries to parse and validate it as hook JSON output. If stdout does not begin
+with `{`, it is treated as plain text.
+
+### `prompt`
+
+A prompt hook asks a model to evaluate a condition. It is not a freeform
+transform hook. The model must produce structured JSON:
+
+```json
+{
+  "ok": true,
+  "reason": "optional explanation"
+}
+```
+
+Schema fields:
+
+```json
+{
+  "type": "prompt",
+  "prompt": "Verify that ... Use $ARGUMENTS if needed.",
+  "if": "optional permission-rule filter",
+  "timeout": 30,
+  "model": "optional model name",
+  "statusMessage": "optional spinner text",
+  "once": false
+}
+```
+
+Behavior:
+
+- `$ARGUMENTS` is replaced with hook input JSON.
+- Indexed forms like `$ARGUMENTS[0]` and `$0` are handled through the shared
+  argument substitution helper.
+- Default model is the small fast model.
+- Default timeout is 30 seconds for prompt hook model calls.
+- Prompt hooks call the model without streaming.
+- For `Stop` and `SubagentStop`, Claude wraps the prompt as a stop-condition
+  evaluator over the transcript.
+- `ok: false` blocks and sets `preventContinuation`.
+- Prompt hooks require `ToolUseContext`, so they are not supported in
+  outside-REPL paths. Outside-REPL callers return an unsupported message for
+  prompt hooks.
+
+### `agent`
+
+An agent hook runs an agentic verifier. It is heavier than a prompt hook: the
+hook agent can use tools, inspect the codebase, and must finish by producing
+structured output.
+
+Schema fields:
+
+```json
+{
+  "type": "agent",
+  "prompt": "Verify that ... Use $ARGUMENTS if needed.",
+  "if": "optional permission-rule filter",
+  "timeout": 60,
+  "model": "optional model name",
+  "statusMessage": "optional spinner text",
+  "once": false
+}
+```
+
+Behavior:
+
+- `$ARGUMENTS` is replaced with hook input JSON.
+- Default model is the small fast model.
+- Default timeout is 60 seconds.
+- The hook agent gets a synthetic structured-output tool and must return:
+
+```json
+{
+  "ok": true,
+  "reason": "optional explanation"
+}
+```
+
+- If the hook agent returns `ok: false`, the hook blocks.
+- Agent hook execution is capped at 50 assistant turns.
+- Agent hooks filter out tools disallowed for agents and avoid duplicate
+  structured-output tools.
+- The hook agent is allowed to read the transcript file.
+- Agent hooks require `ToolUseContext`, so outside-REPL paths do not support
+  them.
+
+### `http`
+
+HTTP hooks POST hook input JSON to a URL and require JSON responses.
+
+Schema fields:
+
+```json
+{
+  "type": "http",
+  "url": "https://example.com/hook",
+  "if": "optional permission-rule filter",
+  "timeout": 30,
+  "headers": {
+    "Authorization": "Bearer $MY_TOKEN"
+  },
+  "allowedEnvVars": ["MY_TOKEN"],
+  "statusMessage": "optional spinner text",
+  "once": false
+}
+```
+
+Behavior:
+
+- Request method is POST.
+- Body is the hook input JSON string.
+- `Content-Type` is `application/json`.
+- HTTP 2xx is success.
+- Non-2xx is a non-blocking hook error unless the caller interprets structured
+  output separately.
+- Empty response body is treated like `{}`.
+- Non-JSON response bodies are validation errors.
+- HTTP hooks are skipped for `SessionStart` and `Setup` in the reconstructed
+  runtime because headless mode can deadlock before the structured input
+  consumer is ready.
+
+### Internal `callback`
+
+Callback hooks are registered through SDK/control or internal code. They are
+not persisted to settings JSON.
+
+They receive:
+
+```ts
+(
+  input: HookInput,
+  toolUseID: string | null,
+  abort: AbortSignal | undefined,
+  hookIndex?: number,
+  context?: HookCallbackContext
+) => Promise<HookJSONOutput>
+```
+
+Callback hooks can return the same JSON output shape as command hooks.
+
+Internal callbacks can be marked `internal: true`. Internal-only batches use a
+fast path and are excluded from `tengu_run_hook` metrics.
+
+### Internal `function`
+
+Function hooks are session-scoped, in-memory boolean validators. They are used
+for internal enforcement, for example making a hook agent call the
+structured-output tool. They cannot be persisted to settings.
+
+Function hook callbacks receive the conversation messages and an optional abort
+signal. Returning `false` creates a blocking error with the configured
+`errorMessage`.
+
+## Matcher semantics
+
+Most events have a `matcher` field. The event determines which input field is
+matched.
+
+Matching rules:
+
+- Empty matcher or `*` matches everything.
+- Simple alphanumeric names match exactly.
+- Pipe-separated simple names match any exact name, for example
+  `Write|Edit|MultiEdit`.
+- More complex strings are treated as regular expressions.
+- Tool names are normalized for legacy aliases where applicable.
+- Regex matching also tests legacy tool names so old patterns can still match.
+- Invalid regex patterns do not match.
+
+Event matcher fields:
+
+| Event | Matcher field |
+| --- | --- |
+| `PreToolUse` | `tool_name` |
+| `PostToolUse` | `tool_name` |
+| `PostToolUseFailure` | `tool_name` |
+| `PermissionRequest` | `tool_name` |
+| `PermissionDenied` | `tool_name` |
+| `SessionStart` | `source` |
+| `Setup` | `trigger` |
+| `PreCompact` | `trigger` |
+| `PostCompact` | `trigger` |
+| `Notification` | `notification_type` |
+| `SessionEnd` | `reason` |
+| `StopFailure` | `error` |
+| `SubagentStart` | `agent_type` |
+| `SubagentStop` | `agent_type` |
+| `Elicitation` | `mcp_server_name` |
+| `ElicitationResult` | `mcp_server_name` |
+| `ConfigChange` | `source` |
+| `InstructionsLoaded` | `load_reason` |
+| `FileChanged` | basename of `file_path` |
+| `Stop` | no matcher |
+| `TeammateIdle` | no matcher |
+| `TaskCreated` | no matcher |
+| `TaskCompleted` | no matcher |
+| `WorktreeCreate` | no matcher |
+| `WorktreeRemove` | no matcher |
+| `CwdChanged` | no matcher |
+
+## `if` condition semantics
+
+`command`, `prompt`, `agent`, and `http` hooks may include an `if` field.
+
+The `if` field uses permission-rule syntax:
+
+```json
+{
+  "type": "command",
+  "command": "npm run lint",
+  "if": "Bash(npm *)"
+}
+```
+
+The runtime only evaluates `if` for tool-related events:
 
 - `PreToolUse`
 - `PostToolUse`
 - `PostToolUseFailure`
-- `Notification`
-- `UserPromptSubmit`
+- `PermissionRequest`
+
+If an `if` condition is configured for a non-tool event, it cannot be evaluated
+and the hook is skipped.
+
+The `if` matcher is optimized so expensive tool-specific permission matching
+is prepared once per hook event batch and reused across hooks.
+
+## Deduplication and ordering
+
+After matching, hooks are deduplicated by type and identity:
+
+- `command`: shell + command + `if`
+- `prompt`: prompt + `if`
+- `agent`: prompt + `if`
+- `http`: URL + `if`
+
+The dedup key is namespaced by plugin root or skill root. This prevents two
+different plugins with the same templated command from collapsing into one
+hook.
+
+Callback and function hooks are not deduplicated.
+
+Hooks in a batch run in parallel. The runtime aggregates results as they finish.
+For permission behavior, precedence is:
+
+1. `deny`
+2. `ask`
+3. `allow`
+
+An `allow` from a hook does not bypass deny or ask rules in settings. The
+permission resolver still checks rule-based permissions after a hook allow.
+
+## Common hook input fields
+
+Every hook input starts with common fields:
+
+```json
+{
+  "session_id": "string",
+  "transcript_path": "string",
+  "cwd": "string",
+  "permission_mode": "optional string",
+  "agent_id": "optional string",
+  "agent_type": "optional string"
+}
+```
+
+Notes:
+
+- `session_id` is the current session ID unless a caller supplies one.
+- `transcript_path` points to the JSONL transcript for the session.
+- `cwd` is the current working directory.
+- `permission_mode` is included when a caller has one.
+- `agent_id` is present only for subagent contexts.
+- `agent_type` can be present for subagent contexts or for main-thread
+  `--agent` sessions.
+- Generated SDK schemas mention an optional `effort` field, but the
+  reconstructed `createBaseHookInput()` function does not populate it directly.
+  Treat `effort` as schema-present but not reliably present in observed hook
+  construction unless separately verified for a call site.
+
+## Common hook JSON output
+
+If a hook emits JSON, it must match the hook output schema.
+
+Common sync output:
+
+```json
+{
+  "continue": true,
+  "suppressOutput": false,
+  "stopReason": "optional reason",
+  "decision": "approve",
+  "reason": "optional decision reason",
+  "systemMessage": "optional warning or message",
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse"
+  }
+}
+```
+
+Common fields:
+
+- `continue: false`: requests that Claude stop continuing after the hook.
+- `stopReason`: message shown when continuation is stopped.
+- `suppressOutput`: suppresses hook stdout from transcript output for JSON
+  command hooks.
+- `decision: "approve"`: maps to permission behavior `allow`.
+- `decision: "block"`: maps to permission behavior `deny` and creates a
+  blocking error using `reason` or a default.
+- `reason`: reason for a decision or block.
+- `systemMessage`: shown to the user as a hook system message.
+- `hookSpecificOutput`: event-specific structured output.
+
+The generated SDK schema also includes `terminalSequence`. I did not find
+handling for this field in `source/src/utils/hooks.ts`, so treat it as
+schema-present but not clearly processed by the reconstructed runtime.
+
+## Async hook protocol
+
+There are two ways a command hook can be async:
+
+1. Configure the hook with `"async": true`.
+2. Emit an async JSON line as the first line of stdout:
+
+```json
+{"async": true, "asyncTimeout": 15000}
+```
+
+Behavior:
+
+- Async hooks are backgrounded and return success immediately to the main hook
+  batch.
+- The async hook registry tracks pending background hooks.
+- When a background hook finishes, Claude scans stdout for the first non-async
+  JSON response line.
+- `asyncTimeout` defaults to 15000 ms if omitted.
+- The registry emits hook response/progress events when hook event streaming is
+  enabled.
+- Completed `SessionStart` async hooks invalidate the session environment
+  cache.
+
+`asyncRewake` is a command-hook setting:
+
+```json
+{
+  "type": "command",
+  "command": "./long-stop-check.sh",
+  "asyncRewake": true
+}
+```
+
+`asyncRewake` implies async behavior. It bypasses the normal async registry.
+If the hook exits with status `2`, Claude enqueues a task notification that can
+wake or re-enter the model with a system reminder containing the blocking
+output.
+
+## Hook command prompt requests
+
+Command hooks can ask the user to choose from options while they are running.
+The hook writes a prompt request JSON line to stdout:
+
+```json
+{
+  "prompt": "request-id",
+  "message": "Select a deployment target",
+  "options": [
+    {
+      "key": "staging",
+      "label": "Staging",
+      "description": "Deploy to staging"
+    },
+    {
+      "key": "prod",
+      "label": "Production"
+    }
+  ]
+}
+```
+
+Claude detects that line, asks the user through the bound prompt callback, and
+writes this response to the hook stdin:
+
+```json
+{
+  "prompt_response": "request-id",
+  "selected": "staging"
+}
+```
+
+Processed prompt request lines are removed from final stdout before hook output
+parsing, so they do not accidentally become hook results.
+
+## Event reference
+
+### `PreToolUse`
+
+Fires before a tool executes.
+
+Matcher: `tool_name`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {},
+  "tool_use_id": "string"
+}
+```
+
+Capabilities:
+
+- Block the tool call.
+- Approve the tool call.
+- Force an ask flow.
+- Modify `tool_input`.
+- Add context to the model.
+- Stop continuation.
+
+Event-specific output:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow",
+    "permissionDecisionReason": "approved by policy",
+    "updatedInput": {},
+    "additionalContext": "extra context for Claude"
+  }
+}
+```
+
+`permissionDecision` can be `allow`, `deny`, `ask`, and the generated SDK schema
+also includes `defer`; the reconstructed `processHookJSONOutput()` switch
+handles `allow`, `deny`, and `ask`.
+
+Important semantics:
+
+- Plain exit code `2` blocks with stderr.
+- JSON `decision: "block"` blocks.
+- JSON `hookSpecificOutput.permissionDecision: "deny"` blocks.
+- `updatedInput` is applied if the hook allows or asks, or as a passthrough if
+  no permission decision is returned.
+- A hook allow skips the interactive prompt only if no deny/ask rule overrides
+  it.
+
+### `PostToolUse`
+
+Fires after a tool succeeds.
+
+Matcher: `tool_name`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {},
+  "tool_response": {},
+  "tool_use_id": "string",
+  "duration_ms": 123
+}
+```
+
+Capabilities:
+
+- Add context to the next model request.
+- Block/stop continuation by returning blocking output.
+- Modify MCP tool output.
+
+Event-specific output:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PostToolUse",
+    "additionalContext": "context after the tool",
+    "updatedMCPToolOutput": {}
+  }
+}
+```
+
+Generated SDK schemas also include `updatedToolOutput`, described as replacing
+the output for all tools. The reconstructed `processHookJSONOutput()` only
+extracts `updatedMCPToolOutput`, and `runPostToolUseHooks()` only applies it
+when the tool is an MCP tool. Treat `updatedToolOutput` as schema-present but
+not clearly implemented in the reconstructed runtime.
+
+### `PostToolUseFailure`
+
+Fires after a tool execution fails.
+
+Matcher: `tool_name`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "PostToolUseFailure",
+  "tool_name": "Bash",
+  "tool_input": {},
+  "tool_use_id": "string",
+  "error": "error text",
+  "is_interrupt": false,
+  "duration_ms": 123
+}
+```
+
+Capabilities:
+
+- Add context after failure.
+- Emit blocking feedback.
+- Emit non-blocking errors.
+
+Event-specific output:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PostToolUseFailure",
+    "additionalContext": "failure-specific context"
+  }
+}
+```
+
+### `PermissionRequest`
+
+Fires when Claude Code is about to display a permission dialog.
+
+Matcher: `tool_name`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "Bash",
+  "tool_input": {},
+  "permission_suggestions": []
+}
+```
+
+Capabilities:
+
+- Programmatically allow the permission request.
+- Programmatically deny the permission request.
+- Update the input on allow.
+- Return permission updates.
+
+Event-specific output:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PermissionRequest",
+    "decision": {
+      "behavior": "allow",
+      "updatedInput": {},
+      "updatedPermissions": []
+    }
+  }
+}
+```
+
+Deny output:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PermissionRequest",
+    "decision": {
+      "behavior": "deny",
+      "message": "Denied by policy",
+      "interrupt": true
+    }
+  }
+}
+```
+
+### `PermissionDenied`
+
+Fires after the auto-mode classifier denies a tool call.
+
+Matcher: `tool_name`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "PermissionDenied",
+  "tool_name": "Bash",
+  "tool_input": {},
+  "tool_use_id": "string",
+  "reason": "Permission denied"
+}
+```
+
+Capabilities:
+
+- Tell the model it may retry.
+
+Event-specific output:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PermissionDenied",
+    "retry": true
+  }
+}
+```
+
+This is specifically wired for transcript-classifier auto mode denials. If
+`retry: true` is returned, Claude adds a meta message saying the hook indicated
+the tool call may be retried.
+
+### `Notification`
+
+Fires when Claude Code sends notification events.
+
+Matcher: `notification_type`
+
+Known notification type values from metadata:
+
+- `permission_prompt`
+- `idle_prompt`
+- `auth_success`
+- `elicitation_dialog`
+- `elicitation_complete`
+- `elicitation_response`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "Notification",
+  "message": "message text",
+  "title": "optional title",
+  "notification_type": "permission_prompt"
+}
+```
+
+Event-specific output:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "Notification",
+    "additionalContext": "optional context"
+  }
+}
+```
+
+Notification hooks run outside the REPL path. Their errors are logged/debugged
+rather than injected into the model like tool hooks.
+
+### `UserPromptSubmit`
+
+Fires after the user submits a prompt and before processing continues.
+
+Matcher: none.
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "original user prompt",
+  "session_title": "optional schema field"
+}
+```
+
+Capabilities:
+
+- Block prompt processing.
+- Stop continuation.
+- Add context to the user prompt.
+
+Event-specific output:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptSubmit",
+    "additionalContext": "context to add"
+  }
+}
+```
+
+In generated SDK schemas, `UserPromptSubmit` output also has `sessionTitle` and
+`suppressOriginalPrompt`. I did not find runtime handling for those fields in
+the reconstructed `processHookJSONOutput()` / `processUserInput()` path.
+
+Blocking behavior:
+
+- Exit `2` or JSON block prevents the prompt from being queried.
+- The current reconstructed `processUserInput()` path returns a warning system
+  message that includes the original prompt text in the block message.
+- `continue: false` stops processing but keeps the original prompt in context
+  with an "Operation stopped by hook" message.
+
+### `SessionStart`
+
+Fires when a session starts, resumes, clears, or starts after compaction.
+
+Matcher: `source`
+
+Source values:
+
+- `startup`
+- `resume`
+- `clear`
+- `compact`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "SessionStart",
+  "source": "startup",
+  "agent_type": "optional agent type",
+  "model": "optional model"
+}
+```
+
+Capabilities:
+
+- Add context.
+- Set an initial user message.
+- Register file watch paths.
+- Write env exports to `CLAUDE_ENV_FILE` for bash hooks.
+
+Event-specific output:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "SessionStart",
+    "additionalContext": "context for Claude",
+    "initialUserMessage": "message to inject",
+    "watchPaths": ["/absolute/path"]
+  }
+}
+```
+
+Notes:
+
+- Plugin hooks are explicitly loaded before `SessionStart` hooks unless
+  managed-only policy blocks plugin hooks.
+- Blocking errors are ignored by the session start processor.
+- HTTP hooks are skipped for this event.
+- Bash command hooks may receive `CLAUDE_ENV_FILE`.
+
+### `Setup`
+
+Fires for repo setup hooks.
+
+Matcher: `trigger`
+
+Trigger values:
+
+- `init`
+- `maintenance`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "Setup",
+  "trigger": "init"
+}
+```
+
+Event-specific output:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "Setup",
+    "additionalContext": "context for Claude"
+  }
+}
+```
+
+Notes:
+
+- Plugin hooks are loaded before setup hooks unless managed-only policy blocks
+  plugin hooks.
+- Blocking errors are ignored by setup processing.
+- HTTP hooks are skipped for this event.
+- Bash command hooks may receive `CLAUDE_ENV_FILE`.
+
+### `Stop`
+
+Fires right before Claude concludes its response.
+
+Matcher: none.
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "optional text of last assistant message"
+}
+```
+
+Capabilities:
+
+- Prevent Claude from stopping.
+- Provide feedback to the model.
+- Enforce stop conditions.
+
+Behavior:
+
+- Exit `2` creates "Stop hook feedback" and continues the conversation.
+- `continue: false` prevents continuation and records a stop reason.
+- Prompt hooks for `Stop` are evaluated as stop-condition checks over the
+  transcript.
+- Agent hooks for `Stop` run an agentic verifier.
+- Stop hook progress and summary messages are shown in the UI, with error
+  details available in transcript mode.
+
+### `StopFailure`
+
+Fires when a turn ends due to an API-level assistant error instead of a normal
+stop.
+
+Matcher: `error`
+
+Known matcher values from metadata:
+
+- `rate_limit`
+- `authentication_failed`
+- `billing_error`
+- `invalid_request`
+- `server_error`
+- `max_output_tokens`
+- `unknown`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "StopFailure",
+  "error": "rate_limit",
+  "error_details": "optional details",
+  "last_assistant_message": "optional last assistant text"
+}
+```
+
+This hook is fire-and-forget. Hook output and exit codes are ignored by the
+caller beyond debug/error handling.
+
+### `SubagentStart`
+
+Fires when an `Agent` tool subagent starts.
+
+Matcher: `agent_type`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "SubagentStart",
+  "agent_id": "agent id",
+  "agent_type": "general-purpose"
+}
+```
+
+Event-specific output:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "SubagentStart",
+    "additionalContext": "context for the subagent"
+  }
+}
+```
+
+Blocking errors are ignored by the subagent start path.
+
+### `SubagentStop`
+
+Fires before a subagent concludes.
+
+Matcher: `agent_type`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "agent_id": "agent id",
+  "agent_transcript_path": "path/to/subagent.jsonl",
+  "agent_type": "general-purpose",
+  "last_assistant_message": "optional text"
+}
+```
+
+Behavior mirrors `Stop`, but feedback goes to the subagent. Agent frontmatter
+`Stop` hooks are registered as `SubagentStop`.
+
+### `PreCompact`
+
+Fires before conversation compaction.
+
+Matcher: `trigger`
+
+Trigger values:
+
+- `manual`
+- `auto`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "PreCompact",
+  "trigger": "manual",
+  "custom_instructions": "optional existing custom instructions"
+}
+```
+
+Behavior:
+
+- Successful stdout from hooks is collected and appended as custom compact
+  instructions.
+- Hook execution results are summarized for user display.
+- Exit `2` / JSON block is treated as a blocking result by the outside-REPL
+  executor. Compaction callers check for blocked results and can prevent
+  compaction.
+
+### `PostCompact`
+
+Fires after conversation compaction.
+
+Matcher: `trigger`
+
+Trigger values:
+
+- `manual`
+- `auto`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "PostCompact",
+  "trigger": "manual",
+  "compact_summary": "summary text"
+}
+```
+
+Behavior:
+
+- Hook success/failure is summarized for user display.
+- Successful stdout is shown in the summary message.
+
+### `SessionEnd`
+
+Fires when a session ends.
+
+Matcher: `reason`
+
+Reason values in `ExitReason`:
+
+- `clear`
+- `resume`
+- `logout`
+- `prompt_input_exit`
+- `other`
+- `bypass_permissions_disabled`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "SessionEnd",
+  "reason": "clear"
+}
+```
+
+Behavior:
+
+- Runs outside the REPL.
+- During shutdown, failures are written to stderr.
+- Session hooks are cleared after execution.
+- Shutdown callers cap the whole event with
+  `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`, default 1500 ms.
+- A per-hook `timeout` can be configured, but shutdown callers also pass the
+  overall abort signal cap.
+
+### `TeammateIdle`
+
+Fires when a teammate is about to go idle.
+
+Matcher: none.
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "TeammateIdle",
+  "teammate_name": "name",
+  "team_name": "team"
+}
+```
+
+Behavior:
+
+- Exit `2` blocks idle and sends feedback to the teammate/model.
+- `continue: false` prevents continuation.
+
+### `TaskCreated`
+
+Fires when a task is being created.
+
+Matcher: none.
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "TaskCreated",
+  "task_id": "id",
+  "task_subject": "subject",
+  "task_description": "optional description",
+  "teammate_name": "optional teammate",
+  "team_name": "optional team"
+}
+```
+
+Behavior:
+
+- Exit `2` blocks task creation.
+- `continue: false` prevents continuation.
+
+### `TaskCompleted`
+
+Fires when a task is being marked complete.
+
+Matcher: none.
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "TaskCompleted",
+  "task_id": "id",
+  "task_subject": "subject",
+  "task_description": "optional description",
+  "teammate_name": "optional teammate",
+  "team_name": "optional team"
+}
+```
+
+Behavior:
+
+- Exit `2` blocks task completion.
+- Teammate stop processing runs this for in-progress tasks owned by the
+  teammate before allowing the teammate to idle.
+
+### `Elicitation`
+
+Fires when an MCP server requests user input through elicitation.
+
+Matcher: `mcp_server_name`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "Elicitation",
+  "mcp_server_name": "server",
+  "message": "prompt from server",
+  "mode": "form",
+  "url": "optional url",
+  "elicitation_id": "optional id",
+  "requested_schema": {}
+}
+```
+
+Event-specific output:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "Elicitation",
+    "action": "accept",
+    "content": {}
+  }
+}
+```
+
+Actions:
+
+- `accept`
+- `decline`
+- `cancel`
+
+Behavior:
+
+- A hook can auto-respond instead of showing the dialog.
+- `decline` creates a blocking error.
+- Exit `2` blocks/denies the elicitation.
+
+### `ElicitationResult`
+
+Fires after the user responds to an MCP elicitation, before the response is
+sent to the MCP server.
+
+Matcher: `mcp_server_name`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "ElicitationResult",
+  "mcp_server_name": "server",
+  "elicitation_id": "optional id",
+  "mode": "form",
+  "action": "accept",
+  "content": {}
+}
+```
+
+Event-specific output:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "ElicitationResult",
+    "action": "decline",
+    "content": {}
+  }
+}
+```
+
+Behavior:
+
+- A hook can observe or override the action/content before sending to the MCP
+  server.
+- `decline` creates a blocking error.
+- Exit `2` blocks the response.
+
+### `ConfigChange`
+
+Fires when configuration files change during a session.
+
+Matcher: `source`
+
+Source values:
+
+- `user_settings`
+- `project_settings`
+- `local_settings`
+- `policy_settings`
+- `skills`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "ConfigChange",
+  "source": "project_settings",
+  "file_path": "optional changed path"
+}
+```
+
+Behavior:
+
+- Intended for auditing and policy reactions to settings/skills changes.
+- Blocking is ignored for `policy_settings`; policy changes are enterprise
+  managed and cannot be blocked by hooks.
+- Skill config-change hooks can block skill changes from applying in-session.
+
+### `InstructionsLoaded`
+
+Fires when an instruction file is loaded into context.
+
+Matcher: `load_reason`
+
+Load reasons:
+
+- `session_start`
+- `nested_traversal`
+- `path_glob_match`
+- `include`
+- `compact`
+
+Memory types:
+
+- `User`
+- `Project`
+- `Local`
+- `Managed`
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "InstructionsLoaded",
+  "file_path": "/path/to/CLAUDE.md",
+  "memory_type": "Project",
+  "load_reason": "session_start",
+  "globs": ["optional matching globs"],
+  "trigger_file_path": "optional touched file path",
+  "parent_file_path": "optional including file"
+}
+```
+
+Behavior:
+
+- Observability/audit only.
+- Fire-and-forget.
+- Does not support blocking.
+
+Dispatch sites include eager session-start loads, reloads after compaction, and
+lazy nested/conditional instruction loads when Claude touches a triggering file.
+
+### `WorktreeCreate`
+
+Fires when Claude Code needs a custom/VCS-agnostic isolated worktree.
+
+Matcher: none.
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "WorktreeCreate",
+  "name": "suggested-worktree-slug"
+}
+```
+
+Output:
+
+- Command hooks should print the absolute worktree path on stdout.
+- HTTP/callback hooks can use:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "WorktreeCreate",
+    "worktreePath": "/absolute/path"
+  }
+}
+```
+
+Behavior:
+
+- The first successful result with non-empty output is used.
+- If no successful result provides output, worktree creation throws an error.
+
+### `WorktreeRemove`
+
+Fires when a previously created custom worktree should be removed.
+
+Matcher: none.
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "WorktreeRemove",
+  "worktree_path": "/absolute/path"
+}
+```
+
+Behavior:
+
+- Returns true if hooks were configured and ran.
+- Failures are logged with debug/error details.
+- Non-zero exits do not necessarily stop the caller beyond logging.
+
+### `CwdChanged`
+
+Fires after the working directory changes.
+
+Matcher: none.
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "CwdChanged",
+  "old_cwd": "/old/path",
+  "new_cwd": "/new/path"
+}
+```
+
+Capabilities:
+
+- Write environment exports to `CLAUDE_ENV_FILE` for subsequent bash commands.
+- Return file watch paths.
+- Return system messages for the user.
+
+Event-specific output:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "CwdChanged",
+    "watchPaths": ["/absolute/path"]
+  }
+}
+```
+
+Behavior:
+
+- `clearCwdEnvFiles()` runs before `CwdChanged` hooks execute.
+- If hooks return `watchPaths`, the file watcher is updated.
+- System messages from hook JSON are shown through the env-hook notifier.
+
+### `FileChanged`
+
+Fires when a watched file changes, is added, or is unlinked.
+
+Matcher: basename of `file_path`.
+
+Input fields:
+
+```json
+{
+  "hook_event_name": "FileChanged",
+  "file_path": "/absolute/path/.env",
+  "event": "change"
+}
+```
+
+Event values:
+
+- `change`
+- `add`
+- `unlink`
+
+Capabilities:
+
+- Write environment exports to `CLAUDE_ENV_FILE` for subsequent bash commands.
+- Return new dynamic watch paths.
+- Return system messages for the user.
+
+Event-specific output:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "FileChanged",
+    "watchPaths": ["/absolute/path"]
+  }
+}
+```
+
+Watcher behavior:
+
+- Static watch paths come from `FileChanged` matcher strings.
+- Matchers are split on `|`; relative names are resolved against current cwd.
+- Dynamic watch paths from `CwdChanged`/`FileChanged` output are merged.
+- The watcher uses `chokidar`, ignores initial events, and uses an
+  `awaitWriteFinish` stability threshold.
+
+## Status line command
+
+`statusLine` is not an entry in `hooks`, but it uses hook command execution.
+
+Settings shape:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh",
+    "padding": 0
+  }
+}
+```
+
+Input type:
+
+```json
+{
+  "session_id": "string",
+  "transcript_path": "string",
+  "cwd": "string",
+  "permission_mode": "optional",
+  "agent_id": "optional",
+  "agent_type": "optional",
+  "session_name": "optional",
+  "model": {
+    "id": "string",
+    "display_name": "string"
+  },
+  "workspace": {
+    "current_dir": "string",
+    "project_dir": "string",
+    "added_dirs": []
+  },
+  "version": "string",
+  "output_style": {
+    "name": "string"
+  },
+  "cost": {
+    "total_cost_usd": 0,
+    "total_duration_ms": 0,
+    "total_api_duration_ms": 0,
+    "total_lines_added": 0,
+    "total_lines_removed": 0
+  },
+  "context_window": {
+    "total_input_tokens": 0,
+    "total_output_tokens": 0,
+    "context_window_size": 200000,
+    "current_usage": 0,
+    "used_percentage": 0,
+    "remaining_percentage": 100
+  },
+  "exceeds_200k_tokens": false,
+  "rate_limits": {
+    "five_hour": {
+      "used_percentage": 0,
+      "resets_at": "timestamp"
+    },
+    "seven_day": {
+      "used_percentage": 0,
+      "resets_at": "timestamp"
+    }
+  },
+  "vim": {
+    "mode": "INSERT"
+  },
+  "agent": {
+    "name": "string"
+  },
+  "remote": {
+    "session_id": "string"
+  },
+  "worktree": {
+    "name": "string",
+    "path": "string",
+    "branch": "string",
+    "original_cwd": "string",
+    "original_branch": "string"
+  }
+}
+```
+
+Behavior:
+
+- Default timeout is 5000 ms.
+- Only stdout from exit `0` is used.
+- Output is trimmed, empty lines are dropped, and remaining lines are joined
+  with newlines.
+- If managed policy disables all hooks, no status line runs.
+- If non-managed `disableAllHooks` is set, only managed `statusLine` can run.
+- The same trust check applies.
+
+## File suggestion command
+
+`fileSuggestion` is also not an entry in `hooks`, but it uses hook command
+execution.
+
+Settings shape:
+
+```json
+{
+  "fileSuggestion": {
+    "type": "command",
+    "command": "~/.claude/file-suggest.sh"
+  }
+}
+```
+
+Input type:
+
+```json
+{
+  "session_id": "string",
+  "transcript_path": "string",
+  "cwd": "string",
+  "query": "partial @ mention query",
+  "permission_mode": "optional",
+  "agent_id": "optional",
+  "agent_type": "optional"
+}
+```
+
+Behavior:
+
+- Default timeout is 5000 ms.
+- Exit `0` stdout is split by newline.
+- Non-empty trimmed lines become file suggestions.
+- Non-zero, abort, or errors return no suggestions.
+- Managed-only/disable/trust gates mirror `statusLine`.
+
+## Hook event streaming
+
+The hook event subsystem can emit hook execution events separate from the main
+message stream.
+
+Events:
+
+- `started`
+- `progress`
+- `response`
+
+Always emitted events:
+
 - `SessionStart`
-- `SessionEnd`
-- `Stop`
-- `StopFailure`
-- `SubagentStart`
-- `SubagentStop`
-- `PreCompact`
-- `PostCompact`
-- `PermissionRequest`
 - `Setup`
-- `TeammateIdle`
-- `TaskCompleted`
-- `Elicitation`
-- `ElicitationResult`
-- `ConfigChange`
-- `WorktreeCreate`
-- `WorktreeRemove`
-- `InstructionsLoaded`
 
-## Output Semantics
-
-Hook output can affect execution through:
-
-- decisions such as allow/deny/block/continue depending on event type.
-- `additionalContext` injection for supported events.
-- async hook progress.
-- exit-code semantics for command hooks.
-- cancellation behavior when a hook exits with interrupting status.
-
-Tool hooks aggregate decisions and additional context in
-`source/src/services/tools/toolHooks.ts`. Stop hooks and prompt hooks are
-handled in `source/src/query/stopHooks.ts`.
-
-## Environment and Execution
-
-Command hooks receive JSON on stdin, run with a constructed hook environment,
-and can be configured with timeout and matcher behavior. Hook process
-environment construction is covered in detail in `hooks-v2.1.141.md` and the
-environment-variable reference.
-
-## Version-Specific Note
-
-In 2.1.141 the canonical subagent tool name is `Agent`; legacy `Task` still
-exists as an alias. Hook matchers should prefer `Agent` for new configs and use
-`Task` only when compatibility with legacy configs is required.
-
-## Canonical Full Doc
-
-Use `hooks-v2.1.141.md` for exhaustive schemas, examples, matcher semantics,
-HTTP hook behavior, command-hook exit codes, and per-event input/output shapes.
-
-## Event Quick Reference
-
-Tool events:
-
-- `PreToolUse`: before a tool executes; can inspect/modify/deny.
-- `PostToolUse`: after a tool succeeds; can inject context.
-- `PostToolUseFailure`: after a tool fails; can inject failure context.
-
-Prompt/session events:
-
-- `UserPromptSubmit`: after user prompt submission and before model processing.
-- `SessionStart`: session initialization.
-- `SessionEnd`: session shutdown/end.
-- `Stop`: normal stop boundary after model response.
-- `StopFailure`: stop hook failure path.
-
-Subagent/team/task events:
-
-- `SubagentStart`
-- `SubagentStop`
-- `TeammateIdle`
-- `TaskCompleted`
-
-Compaction/config/worktree:
-
-- `PreCompact`
-- `PostCompact`
-- `ConfigChange`
-- `WorktreeCreate`
-- `WorktreeRemove`
-- `InstructionsLoaded`
-
-Interaction events:
-
-- `Notification`
-- `PermissionRequest`
-- `Setup`
-- `Elicitation`
-- `ElicitationResult`
-
-## Hook Types
-
-Command hooks:
-
-- run a local command.
-- receive JSON on stdin.
-- return JSON on stdout.
-- use exit codes plus output schema.
-- have timeout and environment behavior.
-
-Prompt hooks:
-
-- run a model prompt hook.
-- useful for semantic classification or generated context.
-- more expensive than command hooks.
-
-Agent hooks:
-
-- run an agent-style hook.
-- can use broader model/tool behavior depending on config.
-
-HTTP hooks:
-
-- POST hook payloads to configured URLs.
-- blocked for events where HTTP hooks are unsafe.
-- include private IP blocking and URL allowlist checks.
-
-Internal hooks:
-
-- not user-configurable.
-- used by product features and analytics.
-
-## Output Concepts
-
-Common output concepts:
-
-- `decision`: event-specific allow/block/deny/continue behavior.
-- `reason`: human/model-facing reason text.
-- `additionalContext`: extra model context for supported events.
-- `updatedInput`: tool-input mutation for supported pre-tool paths.
-- async hook responses and progress.
-
-Decision aggregation is event-specific. A deny/block decision generally wins
-over passive context additions.
-
-## Security and Policy
-
-2.1.141 hook security includes:
-
-- managed setting policies.
-- `disableAllHooks`.
-- managed-hooks-only style policy.
-- workspace trust checks.
-- simple/bare mode reductions.
-- HTTP private IP blocking.
-- HTTP URL allowlists.
-- plugin hook variable substitution boundaries.
-- subprocess environment construction/scrubbing.
-
-Hooks are powerful enough to alter model context and tool execution. Treat them
-as code execution, not as passive configuration.
-
-## Additional Context Rules
-
-Use `additionalContext` when the hook has concise, current, trustworthy
-information the model would not otherwise have.
-
-Good:
-
-- command output summary.
-- file generated by a tool.
-- policy note based on current repo state.
-- subagent result follow-up.
-
-Bad:
-
-- large copied documents.
-- secrets.
-- stale project notes.
-- instructions that conflict with user prompt.
-- logs printed accidentally to stdout.
-
-## 2.1.141 Compatibility Note
-
-The canonical subagent tool name is `Agent`. Legacy docs and SDK surfaces may
-still use `Task`. For hooks written specifically for 2.1.141 and later, prefer
-`Agent` matchers.
-
-## Event Selection Guide
-
-Use `PreToolUse` when:
-
-- you need to block a tool before it runs.
-- you need to adjust tool input before execution.
-- you need to enforce repo-specific policy.
-- you need to add current context before a tool result exists.
-
-Use `PostToolUse` when:
-
-- you need the successful tool result.
-- you want to add context based on generated files.
-- you want to summarize a subagent result.
-- you want to react to a completed edit/read/search.
-
-Use `PostToolUseFailure` when:
-
-- a failed tool call should produce recovery guidance.
-- failures need logging or notification.
-- a failed command should inject diagnostic context.
-
-Use `Stop` when:
-
-- the main assistant turn is about to stop.
-- you need final validation of the overall response.
-- you need to inject final reminders or prevent completion.
-
-Use `SubagentStop` when:
-
-- the lifecycle boundary is inside a subagent.
-- the hook should apply to subagent-specific cleanup.
-- the parent does not need immediate `PostToolUse` context.
-
-Use `SessionStart`/`Setup` when:
-
-- the session needs initialization.
-- external tools need one-time setup.
-- policy needs to run before normal interaction.
-
-## Matcher Rules
-
-Tool matchers should use canonical tool names in new configs:
-
-- use `Agent`, not `Task`.
-- use `TaskStop`, not `KillShell`.
-- use `TaskOutput`, not `AgentOutputTool` or `BashOutputTool`.
-- use `SendUserMessage`, not `Brief`.
-
-Legacy names can still work where aliases are supported, but canonical names are
-the safer long-term choice.
-
-## Output Handling
-
-Hook output has two different audiences:
-
-- machine-readable JSON fields for Claude Code.
-- stderr/debug output for humans.
-
-Do not print human logs to stdout if stdout is expected to contain JSON. If a
-hook needs to emit both, send diagnostics to stderr and structured control data
-to stdout.
-
-## Security Model
-
-Hooks are code execution. Treat them as privileged:
-
-- they can observe tool inputs.
-- they can block tool execution.
-- they can inject model context.
-- they can run subprocesses.
-- they can read local files if the hook script does so.
-- they can leak secrets if written carelessly.
-
-Managed policy, workspace trust, hook disablement, and simple/bare mode can all
-change whether hooks run.
-
-## Troubleshooting
-
-If a hook does not fire:
-
-- verify hooks are not disabled.
-- verify simple/bare mode is not active.
-- verify managed policy permits hooks.
-- verify the event name is correct.
-- verify the matcher uses the canonical tool name.
-- verify JSON config shape.
-- verify the command exits successfully.
-- verify stdout is valid JSON when JSON is expected.
-- verify the hook file is executable or invoked through an interpreter.
-- verify the relevant tool actually ran in this session mode.
-
-## Future Diff Checklist
-
-For a later release:
-
-1. Inspect hook schemas.
-2. Inspect hook execution environment construction.
-3. Inspect hook event names.
-4. Inspect hook output parsing.
-5. Inspect managed policy controls.
-6. Inspect plugin hook substitution behavior.
-7. Inspect HTTP hook allow/block behavior.
-8. Inspect SDK stream-json hook event inclusion.
-9. Inspect tool alias changes that affect matchers.
-10. Reconcile this quick reference with the full hooks document.
+All other hook event emissions require all hook events to be enabled, which is
+done when SDK `includeHookEvents` is set or when remote mode enables it.
+
+The progress interval defaults to 1000 ms. It emits only when output changes.
+
+`response` events include:
+
+- stdout
+- stderr
+- combined output
+- exit code
+- outcome: `success`, `error`, or `cancelled`
+
+All hook responses are logged to the debug log even if they are not emitted to
+an SDK hook-event handler.
+
+## Telemetry and metrics
+
+Hook execution records several analytics/telemetry signals.
+
+Generic hook execution:
+
+- `tengu_run_hook`
+- `tengu_repl_hook_finished`
+
+Hook error/cancel event names observed in source:
+
+- `tengu_pre_tool_hook_error`
+- `tengu_pre_tool_hooks_cancelled`
+- `tengu_post_tool_hook_error`
+- `tengu_post_tool_hooks_cancelled`
+- `tengu_post_tool_failure_hook_error`
+- `tengu_post_tool_failure_hooks_cancelled`
+- `tengu_pre_stop_hooks_cancelled`
+
+Agent hook telemetry:
+
+- `tengu_agent_stop_hook_success`
+- `tengu_agent_stop_hook_error`
+- `tengu_agent_stop_hook_max_turns`
+
+Beta tracing/OpenTelemetry hook events:
+
+- `hook_execution_start`
+- `hook_execution_complete`
+
+Stats store observations:
+
+- `hook_duration_ms`
+- `pre_tool_hook_duration_ms`
+
+Telemetry includes hook name, hook type counts, hook count, success/block/error
+counts, durations, and sanitized plugin hook counts. Third-party plugin names
+are sanitized to `third-party` unless they belong to official marketplaces.
+
+## Event-specific output summary
+
+| Event | `hookSpecificOutput` support in reconstructed runtime |
+| --- | --- |
+| `PreToolUse` | `permissionDecision`, `permissionDecisionReason`, `updatedInput`, `additionalContext` |
+| `UserPromptSubmit` | `additionalContext` |
+| `SessionStart` | `additionalContext`, `initialUserMessage`, `watchPaths` |
+| `Setup` | `additionalContext` |
+| `SubagentStart` | `additionalContext` |
+| `PostToolUse` | `additionalContext`, `updatedMCPToolOutput` |
+| `PostToolUseFailure` | `additionalContext` |
+| `PermissionDenied` | `retry` |
+| `Notification` | schema includes `additionalContext`; reconstructed `processHookJSONOutput()` does not handle a dedicated Notification branch, but generic `systemMessage` still works |
+| `PermissionRequest` | `decision` allow/deny |
+| `Elicitation` | `action`, `content` |
+| `ElicitationResult` | `action`, `content` |
+| `CwdChanged` | `watchPaths` |
+| `FileChanged` | `watchPaths` |
+| `WorktreeCreate` | `worktreePath` |
+
+## Schema-only or inconsistent artifacts to audit
+
+The local reconstructed source shows a few inconsistencies worth preserving in
+the map for future versions:
+
+- `source/src/entrypoints/sdk/coreSchemas.ts` includes `PostToolBatch` and
+  `UserPromptExpansion` in its schema-level `HOOK_EVENTS`, and defines input
+  and output schemas for both. The runtime `HOOK_EVENTS` exported from
+  `source/src/entrypoints/sdk/coreTypes.ts` does not include them, the settings
+  hook manager does not group/display them, and I did not find dispatch
+  functions for them in `source/src/utils/hooks.ts`. Treat them as schema
+  artifacts, not runtime-supported settings hooks, unless separately verified
+  in the binary.
+- Generated SDK schemas include `updatedToolOutput` for `PostToolUse`, but the
+  reconstructed runtime only extracts and applies `updatedMCPToolOutput`.
+- Generated SDK schemas include `terminalSequence`, but the reconstructed hook
+  processor does not visibly handle it.
+- Generated SDK schemas include `sessionTitle` and `suppressOriginalPrompt` for
+  `UserPromptSubmit`, but the reconstructed hook processor does not visibly
+  handle those fields.
+- A map-only/minified snippet under `rebuild/snippets-2.1.141` appears to show
+  a richer hook schema with command `args` and an `mcp_tool` hook type. The
+  checked reconstructed `source/src/schemas/hooks.ts` does not include those
+  fields/types and `source/src/utils/hooks.ts` has no execution branch for
+  `mcp_tool`. This should be audited against the actual minified span before
+  declaring `mcp_tool` publicly usable in this reconstruction.
+
+## Practical examples
+
+### Block dangerous bash commands before execution
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/block-dangerous-bash.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The hook can return:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "Command touches production credentials"
+  }
+}
+```
+
+### Modify tool input before normal permission flow
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "updatedInput": {
+      "command": "git status --short"
+    }
+  }
+}
+```
+
+If no permission decision is returned, the updated input is passed through to
+normal permission evaluation.
+
+### Add context after a file write
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PostToolUse",
+    "additionalContext": "Formatter changed the file after Write; read before editing again."
+  }
+}
+```
+
+### Register env-file watch paths at session start
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "SessionStart",
+    "watchPaths": [
+      "/home/me/project/.env",
+      "/home/me/project/.envrc"
+    ]
+  }
+}
+```
+
+### Auto-answer an MCP elicitation
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "Elicitation",
+    "action": "accept",
+    "content": {
+      "environment": "staging"
+    }
+  }
+}
+```
+
+### Custom file suggestions
+
+```json
+{
+  "fileSuggestion": {
+    "type": "command",
+    "command": "~/.claude/file-suggestions.sh"
+  }
+}
+```
+
+The script reads JSON from stdin and prints one suggestion per line.
+
+## Bottom line
+
+Claude Code 2.1.141 exposes 27 runtime hook events through `hooks`, plus the
+command-backed `statusLine` and `fileSuggestion` surfaces. The strongest
+integration points are `PreToolUse`, `PostToolUse`, `UserPromptSubmit`,
+`Stop`/`SubagentStop`, `SessionStart`, `PermissionRequest`,
+`Elicitation`/`ElicitationResult`, and the env/file watcher pair
+`CwdChanged`/`FileChanged`.
+
+The system is intentionally broad: settings, managed policy, plugins,
+frontmatter, SDK callbacks, and in-memory session hooks all merge into the same
+execution path. The critical implementation details are that hooks run in
+parallel, workspace trust is required in interactive mode, managed settings can
+restrict or disable hooks, HTTP hooks have dedicated network controls, and
+not every field present in generated SDK schemas is necessarily processed by
+the reconstructed 2.1.141 runtime.
+
+## Deep 2.1.141 Source Audit
+
+This section is the source-backed expansion pass. It is intentionally organized
+like the older comprehensive hook references, but every factual claim below is
+from the 2.1.141 source tree.
+
+### Runtime Source Map
+
+| Concern | 2.1.141 source |
+| --- | --- |
+| Public hook event names | `source/src/entrypoints/sdk/coreTypes.ts` |
+| Generated hook input/output schemas | `source/src/entrypoints/sdk/coreSchemas.ts` |
+| Persisted settings schema | `source/src/schemas/hooks.ts` |
+| Output parser and hook fanout | `source/src/utils/hooks.ts` |
+| Tool lifecycle adapters | `source/src/services/tools/toolHooks.ts` |
+| Settings policy fields | `source/src/utils/settings/types.ts` |
+| Session hook state | `source/src/utils/hooks/sessionHooks.ts` |
+| Async hook registry | `source/src/utils/hooks/AsyncHookRegistry.ts` |
+| Hook progress events | `source/src/utils/hooks/hookEvents.ts` |
+| Hook settings display/merge helpers | `source/src/utils/hooks/hooksSettings.ts` |
+| Hook configuration snapshot | `source/src/utils/hooks/hooksConfigSnapshot.ts` |
+| Prompt hook execution | `source/src/utils/hooks/execPromptHook.ts` |
+| Agent hook execution | `source/src/utils/hooks/execAgentHook.ts` |
+| HTTP hook execution | `source/src/utils/hooks/execHttpHook.ts` |
+| Hook CLI/UI | `source/src/commands/hooks` |
+
+### Canonical Event Set
+
+The settings-facing hook event list comes from `HOOK_EVENTS` in
+`entrypoints/sdk/coreTypes.ts` and is imported by `schemas/hooks.ts`. That is
+the event list that matters for user settings in this reconstruction.
+
+| Event | Match query in runtime | Main input fields beyond base | Runtime behavior |
+| --- | --- | --- | --- |
+| `PreToolUse` | `tool_name` | `tool_name`, `tool_input`, `tool_use_id` | Runs before permission resolution and tool execution. Can add context, mutate input, or request permission behavior. |
+| `PostToolUse` | `tool_name` | `tool_name`, `tool_input`, `tool_response`, `tool_use_id`, optional `duration_ms` | Runs after a successful tool call. Can add context and, for MCP output paths, replace output. |
+| `PostToolUseFailure` | `tool_name` | `tool_name`, `tool_input`, `tool_use_id`, `error`, optional `is_interrupt`, optional `duration_ms` | Runs after a failed or interrupted tool call. Can add context or block continuation. |
+| `Notification` | `notification_type` | `message`, optional `title`, `notification_type` | Runs for notification events outside the main REPL hook path. |
+| `UserPromptSubmit` | none in `getMatchingHooks`; caller passes prompt context | `prompt`, optional `session_title` in generated schema | Runs when a user prompt is submitted. Can inject additional context and can block. |
+| `SessionStart` | `source` | `source`, optional `agent_type`, optional `model` | Runs at startup, resume, clear, or compact start sources. Can inject context, initial user message, and watch paths. |
+| `SessionEnd` | `reason` | `reason` | Runs during shutdown/clear/logout/resume exits. Uses a short default timeout. |
+| `Stop` | none | `stop_hook_active`, optional `last_assistant_message` | Runs when the main thread is about to stop. Blocking can keep the loop alive. |
+| `StopFailure` | `error` | `error`, optional `error_details`, optional `last_assistant_message` | Runs when stop failed due to an assistant/API error path. |
+| `SubagentStart` | `agent_type` | `agent_id`, `agent_type` | Runs when a subagent begins. |
+| `SubagentStop` | `agent_type` | `stop_hook_active`, `agent_id`, `agent_transcript_path`, `agent_type`, optional `last_assistant_message` | Runs when a subagent stops. |
+| `PreCompact` | `trigger` | `trigger`, `custom_instructions` | Runs before compaction. Successful stdout can become replacement custom instructions. |
+| `PostCompact` | `trigger` | `trigger`, `compact_summary` | Runs after compaction and can display user-facing hook status. |
+| `PermissionRequest` | `tool_name` | `tool_name`, `tool_input`, optional `permission_suggestions` | Runs when a permission dialog would be shown. Can allow or deny programmatically. |
+| `PermissionDenied` | `tool_name` | `tool_name`, `tool_input`, `tool_use_id`, `reason` | Runs when a permission path denies without the tool running. Can request retry. |
+| `Setup` | `trigger` | `trigger` | Runs for init and maintenance setup flows. |
+| `TeammateIdle` | none | `teammate_name`, `team_name` | Runs before an in-process teammate becomes idle. Blocking keeps the teammate working. |
+| `TaskCreated` | none | `task_id`, `task_subject`, optional `task_description`, optional teammate/team names | Runs when a task is created. Blocking rolls back task creation. |
+| `TaskCompleted` | none | `task_id`, `task_subject`, optional `task_description`, optional teammate/team names | Runs when a task is completed. Blocking prevents completion. |
+| `Elicitation` | `mcp_server_name` | `mcp_server_name`, `message`, optional `mode`, `url`, `elicitation_id`, `requested_schema` | Runs before an MCP elicitation dialog. Can accept, decline, or cancel. |
+| `ElicitationResult` | `mcp_server_name` | `mcp_server_name`, optional `elicitation_id`, optional `mode`, `action`, optional `content` | Runs after an elicitation response. Can observe or override. |
+| `ConfigChange` | `source` | `source`, optional `file_path` | Runs when settings, skills, or policy config changes. Policy changes are audit-only and cannot be blocked. |
+| `WorktreeCreate` | none | `name` | Used as a VCS-agnostic worktree backend. First successful non-empty output is the worktree path. |
+| `WorktreeRemove` | none | `worktree_path` | Used to clean up hook-created worktrees. Failures log but return a boolean to caller. |
+| `InstructionsLoaded` | `load_reason` | `file_path`, `memory_type`, `load_reason`, optional glob/trigger/parent fields | Observability hook for CLAUDE.md and rules loading. Fire-and-forget. |
+| `CwdChanged` | none in `getMatchingHooks` | `old_cwd`, `new_cwd` | Environment hook. Can refresh watch paths and system messages. |
+| `FileChanged` | basename of `file_path` | `file_path`, `event` of `change`, `add`, or `unlink` | Environment hook. Can refresh watch paths and system messages. |
+
+Generated schemas also contain `PostToolBatch` and `UserPromptExpansion`, but
+the 2.1.141 settings event list used by `schemas/hooks.ts` does not include
+them, and `utils/hooks.ts` has no corresponding executor for either. Treat them
+as generated-schema residue unless a later release wires them into `HOOK_EVENTS`
+and adds runtime execution paths.
+
+### Base Input Contract
+
+Every hook input starts with the base fields created by `createBaseHookInput()`:
+
+| Field | Meaning |
+| --- | --- |
+| `session_id` | Current session UUID, or an agent/session override when supplied. |
+| `transcript_path` | Path for the transcript associated with the session id. |
+| `cwd` | Runtime current working directory. |
+| `permission_mode` | Included when the caller has a tool permission context. |
+| `agent_id` | Present for subagent execution contexts, not for the main thread. |
+| `agent_type` | Subagent type, or main-thread `--agent` type when present. |
+
+Generated schemas also include `effort` on the base input. In the reconstructed
+runtime, the concrete `createBaseHookInput()` implementation in `utils/hooks.ts`
+does not populate `effort`; any doc claiming hooks always receive effort would
+be wrong for this source snapshot. The schema text is useful for API direction,
+but the runtime source is the behavior authority.
+
+### Hook Definition Types
+
+`schemas/hooks.ts` defines four persisted hook kinds:
+
+| Type | Required field | Optional fields | Execution model |
+| --- | --- | --- | --- |
+| `command` | `command` | `if`, `shell`, `timeout`, `statusMessage`, `once`, `async`, `asyncRewake` | Spawns a shell command with JSON input on stdin and hook env vars set. |
+| `prompt` | `prompt` | `if`, `timeout`, `model`, `statusMessage`, `once` | Runs a model prompt hook. `$ARGUMENTS` can carry hook input JSON. |
+| `http` | `url` | `if`, `timeout`, `headers`, `allowedEnvVars`, `statusMessage`, `once` | POSTs hook input JSON to a URL, subject to HTTP hook policy. |
+| `agent` | `prompt` | `if`, `timeout`, `model`, `statusMessage`, `once` | Runs an agentic verifier hook. `$ARGUMENTS` can carry hook input JSON. |
+
+The `if` field is not a shell expression. It uses permission-rule style syntax
+such as `Bash(git *)` and is evaluated before spawning the hook, mainly to avoid
+paying hook startup cost for irrelevant tool calls.
+
+### Output Contract
+
+The parser treats stdout that does not start with `{` as plain text. JSON stdout
+is validated against `hookJSONOutputSchema()`.
+
+Top-level synchronous JSON fields:
+
+| Field | Effect |
+| --- | --- |
+| `continue` | When false, blocks continuation. |
+| `suppressOutput` | Hides stdout from transcript/display handling. |
+| `stopReason` | Message used when continuation is stopped. |
+| `decision` | `approve` or `block`, older cross-event decision path. |
+| `reason` | Explanation for block/decision. |
+| `systemMessage` | Warning/system message surfaced to the user. |
+| `terminalSequence` | Generated schema allows a constrained terminal notification sequence. |
+| `hookSpecificOutput` | Event-specific structured payload. |
+
+Async JSON fields:
+
+| Field | Effect |
+| --- | --- |
+| `async: true` | Registers the hook as background work. |
+| `asyncTimeout` | Optional async timeout. |
+
+Command hooks also use exit codes. The important behavior is:
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | Success. Stdout may be plain text or JSON. |
+| `2` | Blocking error for blocking-capable events. |
+| Other non-zero | Non-blocking hook error unless the caller has a specific blocking interpretation. |
+
+`asyncRewake` is a command-hook-specific path. It bypasses the normal async
+registry and keeps stdout/stderr in memory. If the background command exits with
+code 2, the runtime enqueues a task-notification style system reminder so the
+model can wake and continue instead of silently losing the blocking result.
+
+### Event-Specific Output
+
+| Event | Supported event-specific outputs in 2.1.141 source |
+| --- | --- |
+| `PreToolUse` | `permissionDecision`, `permissionDecisionReason`, `updatedInput`, `additionalContext`. |
+| `UserPromptSubmit` | `additionalContext`; generated schema also includes `sessionTitle` and `suppressOriginalPrompt`, but confirm callers before relying on them. |
+| `SessionStart` | `additionalContext`, `initialUserMessage`, `watchPaths`. |
+| `Setup` | `additionalContext`. |
+| `SubagentStart` | `additionalContext`. |
+| `PostToolUse` | `additionalContext`, `updatedToolOutput`, `updatedMCPToolOutput`. |
+| `PostToolUseFailure` | `additionalContext`. |
+| `PermissionDenied` | `retry`. |
+| `Notification` | `additionalContext`. |
+| `PermissionRequest` | `decision.behavior` of `allow` or `deny`; allow can return `updatedInput` and `updatedPermissions`; deny can return `message` and `interrupt`. |
+| `Elicitation` | `action` and optional `content`. |
+| `ElicitationResult` | `action` and optional `content`. |
+| `CwdChanged` | `watchPaths`. |
+| `FileChanged` | `watchPaths`. |
+| `WorktreeCreate` | `worktreePath` in JSON output, or bare stdout path for command hooks. |
+
+### Permission Semantics
+
+`services/tools/toolHooks.ts` is explicit about `PreToolUse` permissions:
+
+| Hook result | Runtime effect |
+| --- | --- |
+| `allow` | Skips the interactive prompt only if the tool does not require extra user interaction and no deny/ask rule overrides it. Settings deny and ask rules still win. |
+| `ask` | Forces normal permission prompting with the hook's message/reason and optional updated input. |
+| `deny` | Denies immediately with hook decision metadata. |
+| `passthrough` or no decision | Continues normal permission flow. |
+| `updatedInput` without permission behavior | Mutates input and then continues normal permission flow. |
+
+This distinction matters. A `PreToolUse` allow is not equivalent to
+`bypassPermissions`; it is still subordinate to settings rules and tool-level
+requirements.
+
+### Matching Semantics
+
+`getMatchingHooks()` builds the event-specific match query. Important cases:
+
+| Event family | Matcher basis |
+| --- | --- |
+| Tool lifecycle and permission hooks | Tool name. |
+| `SessionStart` | Startup source: `startup`, `resume`, `clear`, `compact`. |
+| `Setup` | Trigger: `init` or `maintenance`. |
+| `PreCompact` / `PostCompact` | Trigger: `manual` or `auto`. |
+| `Notification` | Notification type. |
+| `SessionEnd` | Exit reason. |
+| `StopFailure` | Error code/name. |
+| `SubagentStart` / `SubagentStop` | Agent type. |
+| `Elicitation` / `ElicitationResult` | MCP server name. |
+| `ConfigChange` | Config source. |
+| `InstructionsLoaded` | Load reason. |
+| `FileChanged` | Basename of changed file path. |
+| `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `WorktreeCreate`, `WorktreeRemove`, `CwdChanged` | No dedicated match query in the switch. |
+
+The event existence fast path deliberately over-approximates. It returns true
+when any matcher exists for an event, even if later managed-only filtering or
+pattern matching discards it. The code comments explicitly prefer a false
+positive over a false negative because a false negative skips hooks.
+
+### Security And Policy Gates
+
+The 2.1.141 hook runtime is shaped by several independent gates:
+
+| Gate | Source behavior |
+| --- | --- |
+| Workspace trust | Interactive sessions skip all hooks until trust is accepted. Non-interactive sessions treat trust as implicit. |
+| `CLAUDE_CODE_SIMPLE` / bare mode | Bare/simple mode skips hooks as part of the minimal runtime path. |
+| `disableAllHooks` | Managed/settings policy can disable hooks and status line execution. |
+| `allowManagedHooksOnly` | Managed policy can ignore user, project, and local hooks. |
+| `strictPluginOnlyCustomization` | Can lock customization surfaces including hooks and related local files. |
+| HTTP URL allowlist | Managed policy can restrict HTTP hook targets. |
+| HTTP env interpolation allowlist | Header env interpolation is limited by per-hook `allowedEnvVars` and optional managed allowlists. |
+| SessionEnd timeout | Default is 1500 ms unless `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` is set. |
+
+Do not describe hooks as a single settings feature. Runtime behavior is the
+intersection of trust, settings source, managed policy, hook type, hook event,
+match query, and execution host.
+
+### Sources Of Hooks
+
+2.1.141 merges hooks from more places than just `.claude/settings.json`:
+
+| Source | Notes |
+| --- | --- |
+| Settings snapshot | User, project, local, managed, and flag settings as allowed by settings policy. |
+| Registered SDK callback hooks | Stored in bootstrap state as registered hooks. |
+| Plugin hooks | Native plugin hooks include plugin context and are subject to managed-only rules. |
+| Skill frontmatter hooks | Skills can carry hooks parsed from frontmatter. |
+| Session-derived hooks | Session-only function hooks and callback hooks are stored by session id. |
+
+### Stream JSON And SDK Visibility
+
+Print/SDK mode can include hook lifecycle events when stream-json output is
+enabled with hook event inclusion. The stream subtypes are:
+
+| Subtype | Meaning |
+| --- | --- |
+| `hook_started` | Hook started, with hook event/name metadata. |
+| `hook_progress` | Hook produced progress output while running. |
+| `hook_response` | Hook completed with stdout/stderr/exit metadata. |
+
+These are stream protocol messages, not the same thing as analytics events.
+They are useful for harnesses that need to show hook progress without parsing
+terminal UI.

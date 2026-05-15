@@ -12,7 +12,7 @@ topic checklist only; the behavior below is tied to 2.1.141.
 - `brief-mode-v2.1.141.md` - `SendUserMessage` / legacy `Brief`, entitlement, activation, attachments, rendering, and telemetry.
 - `cached-tokens-v2.1.141.md` - usage object fields, prompt-cache counters, server tool counters, cost tracking, and stats aggregation.
 - `channels-v2.1.141.md` - MCP channel notifications, CLI flags, allowlist/policy gates, permissions relay, and telemetry.
-- `claude-hooks-reference-v2.1.141.md` - compact index for the full hooks writeup in `hooks-v2.1.141.md`.
+- `claude-hooks-reference-v2.1.141.md` - full source-backed hooks reference.
 - `claude-md-best-practices-v2.1.141.md` - actual 2.1.141 CLAUDE.md loading, memory hierarchy, imports, and subagent behavior.
 - `context-injection-v2.1.141.md` - every observed context injection path: CLAUDE.md, agents, hooks, MCP, output styles, skills, channels, teams.
 - `dream-and-speculation-v2.1.141.md` - auto dream, `/dream`, prompt suggestions, speculative execution, and deferred prefetch.
@@ -28,7 +28,7 @@ topic checklist only; the behavior below is tied to 2.1.141.
 ## Existing 2.1.141 Detailed Docs
 
 - `agent-view-2.1.141.md` - Agent View feature writeup.
-- `hooks-v2.1.141.md` - full hooks reference.
+- `claude-hooks-reference-v2.1.141.md` - full hooks reference.
 - `claude-print-v2.1.141.md` - `-p` / `--print` and print-mode telemetry.
 - `harness-detection-v2.1.141.md` - harness detection behavior.
 
@@ -60,7 +60,7 @@ product docs. Each topic is expected to include:
 
 The long-form canonical references are:
 
-- `hooks-v2.1.141.md`
+- `claude-hooks-reference-v2.1.141.md`
 - `agent-view-2.1.141.md`
 - `claude-print-v2.1.141.md`
 - `harness-detection-v2.1.141.md`
@@ -69,3 +69,21 @@ The companion topic references now expand the same source-backed style across
 tools, telemetry, feature gates, environment variables, teams, channels, brief
 mode, auto mode, cron, context injection, CLAUDE.md, token accounting, aliases,
 and experimental features.
+
+## 2.1.141 Documentation Standard
+
+The 2.1.141 documents are intended to be a source-map baseline for future
+Claude Code releases. The archive documents provide structure and minimum
+coverage expectations only. The factual content in the 2.1.141 versions is
+derived from the reconstructed 2.1.141 source tree.
+
+For future updates:
+
+- keep archive docs as quality baselines, not copy sources.
+- cite current-version source paths in each topic.
+- preserve exact flag, schema, event, env var, gate, and file-format names.
+- distinguish user-facing, hidden, gated, internal, and protocol-only behavior.
+- prefer documenting a conditional compiled surface over omitting it.
+- do not collapse separate systems just because they share UI labels.
+- keep migration/legacy names separate from canonical current names.
+- update future diff checklists when new source anchors appear.

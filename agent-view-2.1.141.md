@@ -1151,3 +1151,161 @@ The feature gives Claude Code a way to keep long-running sessions alive outside
 the current terminal and later re-enter them through `claude agents` or
 `claude attach <id>`, while keeping enough state to tell the user whether each
 session is working, waiting, blocked, completed, failed, or restartable.
+
+## Deep 2.1.141 Source Audit Addendum
+
+This addendum tightens the 2.1.141 reconstruction around the exact source that
+implements Agent View and adjacent background-agent surfaces. The important
+point is that there are two related but separate systems:
+
+- `cli/bg.ts`, `jobs/state.ts`, `fleet/jobModel.ts`, `jobs/classifier.ts`, and `jobs/rendezvous.ts` implement background CLI sessions with persisted job records.
+- `components/CoordinatorAgentStatus.tsx`, `state/teammateViewHelpers.ts`, `hooks/useTeammateViewAutoExit.ts`, and `components/TeammateViewHeader.tsx` implement in-REPL agent transcript viewing and steering.
+- `tasks/LocalAgentTask/LocalAgentTask.tsx` is the UI task state for local background agents.
+- `tasks/InProcessTeammateTask/*` is the team/teammate task state, which shares view concepts but has separate lifecycle rules.
+- `cli/handlers/agents.ts` is a lightweight tabular list for background agents, not the transcript viewer.
+- `daemon/*` is the long-lived service surface for assistants, scheduled work, and remote control.
+- `cli/transports/ccrClient.ts`, `cli/remoteIO.ts`, and `hooks/useRemoteSession.ts` are the remote/CCR worker surfaces that can report remote background task counts.
+
+### Persisted Job State
+
+`jobs/state.ts` persists background-job state under the Claude config home in a
+`jobs/<short-id>/state.json` layout. The record is not just a PID file. It
+contains:
+
+- `state`, `detail`, `tempo`, `needs`, and `output` for current status.
+- `template`, `routine`, `intent`, `initialPrompt`, and optional display `name`.
+- `sessionId`, `resumeSessionId`, and `daemonShort`.
+- `cwd`, `worktreePath`, `worktreeBranch`, `worktreeHookBased`, and `originCwd`.
+- `createdAt`, `updatedAt`, and `firstTerminalAt`.
+- optional `children`, `inFlight`, `bridgeSessionId`, `bridgeSessionSeq`, `pid`, and socket metadata.
+- optional sort/pin values loaded from sibling `order`, `stateOrder`, and `pins.json`.
+
+The state loader is deliberately tolerant. Missing or malformed state is
+skipped and debug-logged rather than crashing the whole table. The cache is
+mtime-keyed and capped at 1000 entries, so later map generation should treat
+the persisted shape as canonical but not assume every on-disk directory is
+valid.
+
+### CLI Session Verbs
+
+`cli/bg.ts` exposes the user-visible management verbs:
+
+- `ps` lists live jobs using the columns `ID`, `STATE`, `ACTIVITY`, `AGE`, `NAME`, `CWD`.
+- `logs <id>` prints the recent terminal output from the job log.
+- `attach <id>` launches a foreground Claude process with `--resume <session>` in the job cwd.
+- `stop <id>` sends `SIGTERM`, waits briefly, and marks the job stopped if confirmed.
+- `kill <id>` is currently an alias path through stop semantics.
+- `rm <id>` stops the job and removes the job directory.
+- `respawn <id>|--all` restarts stopped/failed/background jobs with stored respawn flags.
+
+`cli/handlers/agents.ts` is a narrower listing command. It prints `ID`, `BAND`,
+`ACTIVITY`, `AGE`, `AGENT`, `NAME`, `CWD`, and can filter by cwd. It calls
+`deriveBand`, `deriveActivity`, `jobLabel`, and `jobMatchesCwd` from
+`fleet/jobModel.ts`, so its output is driven by the same classification model
+as the background job view.
+
+### Spawn And Reattach Semantics
+
+Background spawning keeps a conservative list of flags that take values:
+`--model`, `--permission-mode`, `--agent`, `--agents`, `--routine`, `--effort`,
+`--add-dir`, MCP/settings/system-prompt flags, permission allow/deny/tool
+filters, debug/session/worktree-related flags, and others. This matters for
+future extraction because the argument parser strips managed resume/session
+flags but preserves user-supplied execution shape.
+
+Reattach environment forwarding is intentionally limited. The source only
+collects keys such as `CLAUDE_CONFIG_DIR`, internal feature overrides, AWS
+region/profile settings, and Google credential/project variables. It does not
+blindly forward the full login shell state as a structured reattach contract.
+The spawned child still receives `process.env` for attach, but the job metadata
+records a smaller explicit reattach set for daemon/fleet paths.
+
+### Rendezvous Socket
+
+`jobs/rendezvous.ts` implements the local socket between the background process
+and an attacher/controller. It supports frames for:
+
+- heartbeat.
+- shutdown and shutdown acknowledgment.
+- repaint.
+- attacher capability announcement.
+- reply injection into an active question handler.
+- state patches and startup-blocked status.
+
+The startup wedge path is significant. If a background process stalls on a
+startup dialog, the job state is patched to `tempo: blocked` with detail like
+`stuck on a startup dialog` and `needs: open this session to continue setup`.
+This is a user-facing Agent View behavior, not merely telemetry.
+
+### Job Classification
+
+`jobs/classifier.ts` classifies agent status text into user-visible job states.
+The prompt explicitly distinguishes:
+
+- `working` when the agent owns a next step or waits on work it started.
+- `done` when the agent's part is complete and any remaining action is passive.
+- `blocked` when a specific missing input, credential, file, approval, or user decision is needed.
+
+It also extracts `detail`, `tempo`, and output metadata. The classifier is
+designed to phrase detail like a colleague's short status update rather than a
+generic "completed task" label. Future docs should preserve that detail because
+it is what makes Agent View useful as a manager view rather than a process list.
+
+### In-REPL Coordinator Panel
+
+`components/CoordinatorAgentStatus.tsx` renders the compact panel below the
+prompt when local-agent tasks exist. Its visibility rules are state-based:
+
+- `getVisibleAgentTasks()` filters panel-agent tasks whose `evictAfter` is not `0`.
+- running or retained tasks show while `evictAfter` is undefined.
+- terminal tasks linger until `evictAfter` passes.
+- immediate dismiss sets `evictAfter` to `0`.
+- a one-second interval evicts expired terminal rows and updates elapsed time.
+
+The panel renders a `main` row and one row per visible background agent. Agent
+rows show the registered agent name, prompt/summary, elapsed time, token count,
+queued message count, running/completed icon, and the contextual `x to stop` or
+`x to clear` hint.
+
+### Transcript View State
+
+`state/teammateViewHelpers.ts` is the core view switcher:
+
+- `enterTeammateView(taskId)` logs `tengu_transcript_view_enter`.
+- the selected task id is stored in `viewingAgentTaskId`.
+- `viewSelectionMode` becomes `viewing-agent`.
+- local-agent tasks are marked `retain: true`, which blocks eviction and enables stream append/disk bootstrap.
+- switching away from another retained local agent releases it back to stub form.
+- `exitTeammateView()` logs `tengu_transcript_view_exit`, clears `viewingAgentTaskId`, and releases retained local-agent transcripts.
+- `stopOrDismissAgent()` aborts running local agents or hides terminal agents.
+
+The release helper clears `messages`, sets `diskLoaded: false`, and sets
+`evictAfter` for terminal tasks. That means the UI does not keep every transcript
+in memory forever. A future source map should distinguish task metadata from
+retained transcript data.
+
+### Header And Auto-Exit
+
+`TeammateViewHeader.tsx` displays the active viewed teammate as `@name`, shows
+the teammate prompt, and renders an `esc return` hint. It is wrapped in
+`OffscreenFreeze`, which avoids re-render churn while the header is not visible.
+
+`useTeammateViewAutoExit.ts` exits the view when the viewed teammate is killed,
+failed, errors, or disappears. Completed teammates remain viewable so the user
+can review the full transcript. Local-agent tasks intentionally do not narrow to
+in-process teammates, so the hook does not eject local-agent transcript views
+just because they are not `InProcessTeammateTask`.
+
+### Remote And Daemon Boundaries
+
+Agent View is not limited to one process topology. 2.1.141 contains:
+
+- local CLI background jobs.
+- remote CCR worker sessions with `worker_status` and external metadata.
+- daemon workers for `scheduled`, `assistant`, and `remote-control`.
+- in-process teammates for Agent Teams.
+- local-agent UI tasks for background agent calls.
+
+Those surfaces share labels and counters, but they are not identical. For
+future releases, a correct map should keep the boundaries separate and only
+merge behavior when the same source function or schema proves it.

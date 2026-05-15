@@ -62,7 +62,7 @@ The most important injection paths are:
 - `PostToolUse`
 - `SubagentStart`
 - `Stop`
-- other hook events covered in `hooks-v2.1.141.md`.
+- other hook events covered in `claude-hooks-reference-v2.1.141.md`.
 
 Tool-hook aggregation happens in `source/src/services/tools/toolHooks.ts`.
 Stop and prompt hook execution happens in `source/src/query/stopHooks.ts`.
@@ -260,7 +260,7 @@ cases:
 - `SubagentStart`: inject into a subagent.
 - `Stop`: force/continue behavior at turn end.
 
-The full per-event schema is in `hooks-v2.1.141.md`.
+The full per-event schema is in `claude-hooks-reference-v2.1.141.md`.
 
 ## MCP Context
 
@@ -445,3 +445,148 @@ For later releases:
 8. Inspect memory and relevant-memory prefetch.
 9. Inspect task notification message builders.
 10. Inspect SDK/print system prompt override handling.
+
+## Deep 2.1.141 Injection Timeline Addendum
+
+Context injection in 2.1.141 is not a single function. It is a timeline of
+system prompt assembly, user-context prepending, file/memory attachments, hook
+output, MCP/tool discovery, queued notifications, and SDK/remote control
+messages.
+
+### Startup And Setup Phase
+
+Before the first query:
+
+- `main.tsx` parses flags that can replace or append system prompts.
+- `--bare` sets `CLAUDE_CODE_SIMPLE=1`, disabling auto-discovered context while preserving explicit inputs.
+- setup initializes UDS messaging, file-changed hook watcher, context-collapse, session-file analytics, and team memory watchers where gated.
+- `startDeferredPrefetches()` can warm system context, credentials, MCP registry URLs, passes, and fast-mode state.
+- MCP config loading is started early but MCP resource prefetch is deferred until after trust-sensitive setup.
+- command, agent, skill, plugin, and MCP loading can all affect model-visible capability context.
+
+### System Context
+
+`context.ts` builds system context with:
+
+- git status snapshot when git instructions are enabled and the session is not remote.
+- current branch.
+- main/default branch.
+- git user name when available.
+- short status, truncated at 2000 characters.
+- last five commits.
+- optional cache-breaker injection when the build feature is active.
+
+`appendSystemContext()` appends system context as `key: value` strings to the
+system prompt. This is separate from user context and is not wrapped in the
+same `<system-reminder>` block.
+
+### User Context
+
+`getUserContext()` builds user context with:
+
+- CLAUDE.md content unless disabled.
+- current local date.
+
+It skips automatic CLAUDE.md discovery when `CLAUDE_CODE_DISABLE_CLAUDE_MDS` is
+truthy, or in `--bare` mode with no explicit added directories. `--bare` still
+honors explicit `--add-dir` directories. The function also writes the CLAUDE.md
+content to bootstrap cache for the auto-mode classifier.
+
+`prependUserContext()` injects user context as a meta user message containing a
+`<system-reminder>` wrapper. The reminder explicitly tells the model that the
+context may or may not be relevant and should not be answered unless relevant.
+
+### CLAUDE.md And Memory
+
+CLAUDE.md injection is assembled through `utils/claudemd.ts` and related memory
+loaders. It can include:
+
+- user/project/local memory files.
+- additional directories from `--add-dir`.
+- imported memory files.
+- filtered injected memory files.
+- cache state used by auto mode.
+
+Memory prefetch can inject attachments later in the query loop, after tool
+execution, if the prefetch has settled and the model has not already read or
+edited the same memory file.
+
+### Tool-Turn Injection
+
+After each tool batch, `query.ts` can inject:
+
+- queued command/task notifications.
+- background task completion prompts.
+- memory attachments.
+- skill discovery prefetch attachments.
+- hook blocking/error/cancel attachments.
+- compact or max-token recovery messages.
+
+The queue drain is scoped. Main-thread queries drain main prompts and
+notifications; subagents only drain task notifications addressed to their own
+agent id. Slash commands are excluded from mid-turn drain because they must go
+through slash-command processing after the turn.
+
+### Hook Injection
+
+Hook outputs can inject:
+
+- `additionalContext`.
+- `systemMessage`.
+- blocking errors.
+- permission decisions.
+- modified tool output.
+- cancellation attachments.
+- async follow-up messages.
+
+The hook path matters because hook-injected context can affect the next API
+request even when no user-visible text appears in the transcript. For future
+release maps, hook output schemas and `utils/hooks.ts` execution order should
+be treated as context-injection surfaces.
+
+### MCP And Plugin Injection
+
+MCP and plugins inject context through:
+
+- tool schemas.
+- deferred tool search descriptions.
+- MCP resources.
+- MCP commands.
+- channel notifications.
+- plugin-provided commands/skills/agents.
+- marketplace/plugin metadata.
+- dynamically managed MCP servers in SDK print mode.
+
+The visible model context can change after startup because MCP servers can
+connect, reconnect, be toggled, or be replaced through SDK control messages.
+
+### Agent And Team Injection
+
+Agent/team features inject:
+
+- main-thread agent system prompts.
+- custom SDK/CLI agent definitions.
+- teammate identity and team context.
+- task-list/team coordination context.
+- Agent View task notifications.
+- Brief/SendUserMessage communication instructions.
+- channel/remote-control availability.
+
+Agent context is especially version-sensitive. Future maps should verify both
+agent definition schemas and runtime filtering in `getTools`, `AgentTool`, and
+team spawn helpers.
+
+### Print/SDK Injection
+
+Print mode adds additional injection routes:
+
+- SDK initialize can provide `systemPrompt`, `appendSystemPrompt`, `agents`, hooks, and JSON schema.
+- stream-json input can include file attachments.
+- dynamic MCP control messages can add/remove servers mid-session.
+- SDK host permission responses can alter tool execution flow.
+- prompt suggestions can be emitted after a result.
+- `--rewind-files` can restore filesystem state and exit before a normal turn.
+
+For documentation, do not treat `claude -p` as a context-lite path. In
+2.1.141 it is one of the richest injection paths because it exposes control
+protocol state that the TUI does not.

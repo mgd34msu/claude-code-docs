@@ -955,3 +955,249 @@ A complete native-tool audit should test these contexts separately:
 - legacy alias call from an old transcript.
 
 The expected tool set can differ in each row.
+
+## Deep 2.1.141 Registry Audit
+
+The native tool registry in 2.1.141 is assembled by `getAllBaseTools()` in
+`source/src/tools.ts`. A source reconstruction should treat this function as
+the root, not the directory listing under `source/src/tools`.
+
+### Registry Order
+
+The effective base registry is constructed in this order, with conditional
+entries included only when their gates pass:
+
+| Order | Tool or group | Gate/condition |
+| --- | --- | --- |
+| 1 | `Agent` | Always imported. |
+| 2 | `TaskOutput` | Always imported. |
+| 3 | `Bash` | Always imported. |
+| 4 | `Glob`, `Grep` | Omitted when embedded search tools are available. |
+| 5 | `ExitPlanMode` | Always imported. |
+| 6 | `Read`, `Edit`, `Write`, `NotebookEdit` | Always imported. |
+| 7 | `WebFetch`, `TodoWrite`, `WebSearch`, `TaskStop`, `AskUserQuestion`, `Skill`, `EnterPlanMode` | Always imported subject to each tool `isEnabled()`. |
+| 8 | `Config` | Ant users only. |
+| 9 | Web browser / overflow / context inspect / terminal capture placeholders | Only present when build flags wire non-null modules. |
+| 10 | `TaskCreate`, `TaskGet`, `TaskUpdate`, `TaskList` | `isTodoV2Enabled()`. |
+| 11 | `LSP` | `ENABLE_LSP_TOOL`. |
+| 12 | `EnterWorktree`, `ExitWorktree` | `isWorktreeModeEnabled()`. |
+| 13 | `SendMessage` | Lazy-loaded team messaging tool. |
+| 14 | `TeamCreate`, `TeamDelete` | `isAgentSwarmsEnabled()`. |
+| 15 | `REPL` | Ant users and REPL module present. |
+| 16 | Cron tools | Build flag `AGENT_TRIGGERS`. |
+| 17 | `RemoteTrigger` | Build flag `AGENT_TRIGGERS_REMOTE`. |
+| 18 | `Monitor` | Build flag `MONITOR_TOOL`. |
+| 19 | `SendUserMessage` | Brief tool object always in registry but `isEnabled()` gates activation. |
+| 20 | `PushNotification` | `KAIROS` or push-notification build flag. |
+| 21 | `PowerShell` | `isPowerShellToolEnabled()`. |
+| 22 | `Snip` | Build flag `HISTORY_SNIP`. |
+| 23 | `TestingPermission` | `NODE_ENV === "test"`. |
+| 24 | `ListMcpResources`, `ReadMcpResource` | Built-in MCP resource helpers. |
+| 25 | `ToolSearch` | Optimistic tool-search enablement. |
+
+After construction, `getToolsForDefaultPreset()` calls each tool's `isEnabled()`
+and returns only enabled names. This means a directory-level reconstruction can
+overcount tools, while a registry-only reconstruction can miss conditional tool
+files that are intentionally excluded in the current build.
+
+### Tool Definition Fields
+
+`Tool.ts` exposes a rich tool contract. Important fields and methods include:
+
+| Field/method | Purpose |
+| --- | --- |
+| `name` | Canonical tool name used by model/tool execution. |
+| `aliases` | Legacy or alternate names accepted by lookup. |
+| `inputSchema` / `outputSchema` | Zod schemas for validation and result typing. |
+| `description()` | Tool description. |
+| `prompt()` | Model-facing tool prompt/instructions. |
+| `call()` | Tool implementation. |
+| `validateInput()` | Extra validation before execution. |
+| `isEnabled()` | Runtime availability gate. |
+| `isReadOnly()` | Permission/read-only classification. |
+| `isConcurrencySafe()` | Whether parallel use is safe. |
+| `shouldDefer` / `isDeferredTool` integration | Tool schema may be deferred/search-loaded. |
+| `requiresUserInteraction()` | Forces permission/user-interaction path even if hooks allow. |
+| `toAutoClassifierInput()` | Projection used by auto-mode classifier. |
+| `mapToolResultToToolResultBlockParam()` | Converts runtime output to Anthropic tool result. |
+| `renderToolUseMessage()` / `renderToolResultMessage()` | Terminal UI rendering. |
+| `getToolUseSummary()` | Short summary for permissions and hooks. |
+
+### Core Tool Families
+
+| Family | Tools | Notes |
+| --- | --- | --- |
+| Agent execution | `Agent`, `TaskOutput`, `TaskStop` | Background/subagent task lifecycle. |
+| Shells | `Bash`, `PowerShell` | Separate security validators, command semantics, path validation, sandbox behavior. |
+| Files | `Read`, `Edit`, `Write`, `NotebookEdit`, `Glob`, `Grep` | File IO and search, with embedded search replacement possible. |
+| Web | `WebFetch`, `WebSearch` | Network tools, preapproval logic for some fetch cases. |
+| Planning/worktrees | `EnterPlanMode`, `ExitPlanMode`, `EnterWorktree`, `ExitWorktree` | Session mode and worktree isolation tools. |
+| MCP helpers | `ListMcpResources`, `ReadMcpResource`, dynamically discovered MCP tools | Built-ins plus server-provided tools. |
+| Skills/tool search | `Skill`, `ToolSearch` | Tool discovery and skill execution. |
+| Teams/tasks | `TeamCreate`, `TeamDelete`, `SendMessage`, `TaskCreate`, `TaskGet`, `TaskUpdate`, `TaskList` | Swarm and task-list surface. |
+| Scheduling/monitoring | `CronCreate`, `CronDelete`, `CronList`, `Monitor`, `RemoteTrigger` | Conditional automation surface. |
+| Communication | `SendUserMessage`, `PushNotification`, `AskUserQuestion` | User communication, notification, and question tools. |
+| Internal/test | `REPL`, `Config`, `TestingPermission`, `CtxInspect`, `Snip` | Build/user/env gated. |
+
+### Agent Tool Policy
+
+`constants/tools.ts` defines several important policy sets:
+
+| Set | Meaning |
+| --- | --- |
+| `ALL_AGENT_DISALLOWED_TOOLS` | Tools blocked for agents, including task output, plan-mode tools, user question, and task stopping. `Agent` itself is allowed for ant users but blocked externally. |
+| `CUSTOM_AGENT_DISALLOWED_TOOLS` | Extends the all-agent disallow set. |
+| `ASYNC_AGENT_ALLOWED_TOOLS` | Positive allowlist for ordinary async agents: file, search, shell, edit/write, notebook, skill, synthetic output, tool search, and worktree tools. |
+| `IN_PROCESS_TEAMMATE_ALLOWED_TOOLS` | Extra team tools for in-process teammates: task tools, `SendMessage`, and cron tools when enabled. |
+| `COORDINATOR_MODE_ALLOWED_TOOLS` | Narrow coordinator set: `Agent`, `TaskStop`, `SendMessage`, `SyntheticOutput`. |
+
+Tool availability for an actual call is therefore not simply "is it in
+`getAllBaseTools()`." It is registry entry plus global gates plus agent policy
+plus permission context plus tool-specific validation.
+
+### Permission Filtering
+
+The registry is filtered by blanket deny rules from the permission context. A
+blanket deny for a built-in tool removes that built-in. A blanket deny for an
+MCP server prefix removes tools from that MCP server. This is intentionally
+aligned with runtime permission matching so the model does not see tools it
+will always be denied from using.
+
+### Alias Audit
+
+Concrete alias cases seen in the 2.1.141 tool layer:
+
+| Canonical | Alias or compatibility name | Notes |
+| --- | --- | --- |
+| `Agent` | `Task` | Legacy subagent/tool name compatibility. |
+| `TaskOutput` | Related to legacy background task output naming | Used by old transcripts/task outputs. |
+| `SendUserMessage` | `Brief` | Brief-mode legacy name. |
+| MCP tools | Optional no-prefix SDK mode through `CLAUDE_AGENT_SDK_MCP_NO_PREFIX` | SDK compatibility path, not a built-in alias field. |
+
+Permission-rule parsing also normalizes legacy names so old configs can still
+match canonical tools. New documentation should use canonical 2.1.141 names.
+
+### Reconstruction Checklist
+
+To verify future source reconstructions against this registry:
+
+1. Read `getAllBaseTools()` and record every conditional spread.
+2. Read each tool's `isEnabled()` because registry presence is not availability.
+3. Read `constants/tools.ts` for agent/coordinator/team policies.
+4. Read `Tool.ts` for fields that affect permission, rendering, classifier, and result mapping.
+5. Check aliases in tool definitions and permission parser normalization.
+6. Check `services/tools` for execution, hook, defer, and streaming paths.
+7. Check MCP client code for dynamic server tools and no-prefix compatibility.
+8. Check environment/build flags that replace search tools or add hidden/internal tools.
+9. Check print/SDK mode because tool lists can be supplied by `--tools`.
+10. Treat placeholder/null imports in `tools.ts` as intentional absence unless 2.1.141 wires them.
+
+## Exact 2.1.141 `getAllBaseTools()` Registry
+
+This is the source-order registry from `source/src/tools.ts`. It is important
+for future source-map work because this order is tied to global system prompt
+caching comments in the file.
+
+| Order | Tool import/expression | Included when |
+| --- | --- | --- |
+| 1 | `AgentTool` | Always imported. |
+| 2 | `TaskOutputTool` | Always imported. |
+| 3 | `BashTool` | Always imported. |
+| 4 | `GlobTool` | Only when embedded search tools are not present. |
+| 5 | `GrepTool` | Only when embedded search tools are not present. |
+| 6 | `ExitPlanModeV2Tool` | Always imported. |
+| 7 | `FileReadTool` | Always imported. |
+| 8 | `FileEditTool` | Always imported. |
+| 9 | `FileWriteTool` | Always imported. |
+| 10 | `NotebookEditTool` | Always imported. |
+| 11 | `WebFetchTool` | Always imported. |
+| 12 | `TodoWriteTool` | Always imported. |
+| 13 | `WebSearchTool` | Always imported, later `isEnabled()` gated. |
+| 14 | `TaskStopTool` | Always imported. |
+| 15 | `AskUserQuestionTool` | Always imported. |
+| 16 | `SkillTool` | Always imported. |
+| 17 | `EnterPlanModeTool` | Always imported. |
+| 18 | `ConfigTool` | Only when `USER_TYPE === 'ant'`. |
+| 19 | `WebBrowserTool` | Null in this external 2.1.141 build. |
+| 20 | `TaskCreateTool` | Only when `isTodoV2Enabled()`. |
+| 21 | `TaskGetTool` | Only when `isTodoV2Enabled()`. |
+| 22 | `TaskUpdateTool` | Only when `isTodoV2Enabled()`. |
+| 23 | `TaskListTool` | Only when `isTodoV2Enabled()`. |
+| 24 | `OverflowTestTool` | Null in this external 2.1.141 build. |
+| 25 | `CtxInspectTool` | Only when `feature('CONTEXT_COLLAPSE')`. |
+| 26 | `TerminalCaptureTool` | Null in this external 2.1.141 build. |
+| 27 | `LSPTool` | Only when `ENABLE_LSP_TOOL` is truthy. |
+| 28 | `EnterWorktreeTool` | Only when worktree mode is enabled. |
+| 29 | `ExitWorktreeTool` | Only when worktree mode is enabled. |
+| 30 | `SendMessageTool` | Lazy-required unconditionally into the base registry. |
+| 31 | `TeamCreateTool` | Only when agent swarms are enabled. |
+| 32 | `TeamDeleteTool` | Only when agent swarms are enabled. |
+| 33 | `VerifyPlanExecutionTool` | Null in this external 2.1.141 build. |
+| 34 | `REPLTool` | Only when `USER_TYPE === 'ant'` and REPL tool import exists. |
+| 35 | `WorkflowTool` | Null in this external 2.1.141 build. |
+| 36 | `CronCreateTool` | Only when `feature('AGENT_TRIGGERS')`. |
+| 37 | `CronDeleteTool` | Only when `feature('AGENT_TRIGGERS')`. |
+| 38 | `CronListTool` | Only when `feature('AGENT_TRIGGERS')`. |
+| 39 | `RemoteTriggerTool` | Only when `feature('AGENT_TRIGGERS_REMOTE')`. |
+| 40 | `MonitorTool` | Only when `feature('MONITOR_TOOL')`. |
+| 41 | `BriefTool` | Always in the base registry, later `isEnabled()` gated. |
+| 42 | `PushNotificationTool` | Only when `feature('KAIROS')` or `feature('KAIROS_PUSH_NOTIFICATION')`. |
+| 43 | `SubscribePRTool` | Null in this external 2.1.141 build. |
+| 44 | `PowerShellTool` | Only when `isPowerShellToolEnabled()`. |
+| 45 | `SnipTool` | Only when `feature('HISTORY_SNIP')`. |
+| 46 | `TestingPermissionTool` | Only when `NODE_ENV === 'test'`. |
+| 47 | `ListMcpResourcesTool` | Always in all-base registry, later special-excluded from normal model-visible built-ins. |
+| 48 | `ReadMcpResourceTool` | Always in all-base registry, later special-excluded from normal model-visible built-ins. |
+| 49 | `ToolSearchTool` | Only when `isToolSearchEnabledOptimistic()`. |
+
+### Normal Model-Visible Built-In Filtering
+
+`getTools(permissionContext)` does not simply return that registry.
+
+First, `CLAUDE_CODE_SIMPLE` narrows tools to:
+
+- `BashTool`.
+- `FileReadTool`.
+- `FileEditTool`.
+- optionally `AgentTool`, `TaskStopTool`, and `SendMessageTool` in coordinator mode.
+- or `REPLTool` in bare+REPL mode, again with coordinator additions when relevant.
+
+Outside simple mode, it removes these special tools from the normal built-in
+set:
+
+- `ListMcpResourcesTool`.
+- `ReadMcpResourceTool`.
+- `SyntheticOutputTool`.
+
+It then applies blanket deny rules from the permission context, hides primitive
+tools when REPL mode is enabled, evaluates every remaining `isEnabled()`, and
+returns only enabled tools.
+
+### MCP Merge Rules
+
+`assembleToolPool()` is the model-facing merge path for built-ins plus MCP:
+
+- built-ins come from `getTools()`.
+- MCP tools are filtered by the same deny-rule logic.
+- built-ins and MCP tools are sorted separately by name.
+- built-ins are kept as a contiguous prefix for prompt-cache stability.
+- `uniqBy(..., 'name')` means built-ins win name conflicts.
+
+`getMergedTools()` is broader and simply concatenates built-ins and MCP tools.
+Use it only when the source call site wants the complete set rather than the
+cache-stable prompt pool.
+
+### Source-Backed Alias Table
+
+Tool aliases found in 2.1.141 source include:
+
+| Current tool | Alias | Source reason |
+| --- | --- | --- |
+| `AgentTool` | legacy agent tool name from `AgentTool/constants.ts` | Old transcripts/configs can still target the old name. |
+| `TaskOutputTool` | `AgentOutputTool`, `BashOutputTool` | Backward compatibility for older output tools. |
+| `TaskStopTool` | `KillShell` | Deprecated name retained for old transcripts. |
+| `BriefTool` | legacy brief tool name from `BriefTool/prompt.ts` | `SendUserMessage` is current, legacy `Brief` remains alias. |
+
+Permission rules and hooks additionally normalize legacy names through
+permission-rule parsing and hook matcher logic. That is separate from the
+runtime `Tool.aliases` property but has the same compatibility goal.

@@ -480,3 +480,122 @@ For later releases, inspect:
 8. teammate cron routing.
 9. GrowthBook keys `tengu_kairos_cron` and `tengu_kairos_cron_durable`.
 10. telemetry events for fire, missed, expired, create, delete, and list.
+
+## Deep 2.1.141 Cron/Loop Addendum
+
+In 2.1.141, `/loop` is a tiny command wrapper, but the real feature is the
+cron scheduling stack:
+
+- `tools/ScheduleCronTool/CronCreateTool.ts`
+- `tools/ScheduleCronTool/CronListTool.ts`
+- `tools/ScheduleCronTool/CronDeleteTool.ts`
+- `tools/ScheduleCronTool/prompt.ts`
+- `utils/cron.ts`
+- `utils/cronTasks.ts`
+- `utils/cronScheduler.ts`
+- `hooks/useScheduledTasks.ts`
+- daemon scheduled-worker code in `daemon/*`
+
+### Tool Surface
+
+The model-facing tools are:
+
+- `CronCreate`
+- `CronList`
+- `CronDelete`
+
+All three are deferred tools and enabled by `isKairosCronEnabled()`. The gate is
+`feature('AGENT_TRIGGERS')`, local override `CLAUDE_CODE_DISABLE_CRON`, and
+GrowthBook key `tengu_kairos_cron` with default true. Durable persistence is
+controlled separately by `tengu_kairos_cron_durable`, also default true.
+
+### CronCreate Schema
+
+`CronCreate` accepts:
+
+- `cron`: standard five-field local-time expression.
+- `prompt`: prompt to enqueue at fire time.
+- `recurring`: semantic boolean, default true.
+- `durable`: semantic boolean, default false.
+
+Validation rejects invalid cron syntax, crons with no run in the next year, too
+many scheduled jobs, and durable teammate crons. The maximum job count is 50.
+
+The result contains:
+
+- `id`.
+- `humanSchedule`.
+- `recurring`.
+- optional `durable`.
+
+### Durable Versus Session-Only
+
+`utils/cronTasks.ts` stores durable tasks in
+`.claude/scheduled_tasks.json`. Session-only tasks are held in bootstrap state
+and never written to disk. File-backed tasks omit the runtime `durable` field
+because being on disk is the durable marker.
+
+The on-disk task shape is:
+
+- `id`.
+- `cron`.
+- `prompt`.
+- `createdAt`.
+- optional `lastFiredAt`.
+- optional `recurring`.
+- optional `permanent`.
+
+Runtime-only fields include:
+
+- `durable: false`.
+- `agentId` for teammate-owned session crons.
+
+### Recurrence And Expiry
+
+Recurring tasks reschedule from `now`, not from the missed scheduled time, to
+avoid rapid catch-up after a blocked or sleeping session. Recurring tasks
+auto-expire after `DEFAULT_CRON_JITTER_CONFIG.recurringMaxAgeMs`, which is seven
+days by default, unless marked `permanent`. Aged recurring tasks fire one final
+time and are then deleted.
+
+One-shot tasks fire once and are removed.
+
+### Jitter
+
+The scheduler adds deterministic per-task jitter:
+
+- recurring tasks can be delayed by a fraction of the interval, capped by default at 15 minutes.
+- one-shot tasks on hot rounded minutes can be fired early, by default up to 90 seconds.
+- jitter is based on the 8-hex task id, so it is stable across restarts.
+
+The prompt explicitly instructs the model to avoid `:00` and `:30` when the user
+does not require an exact time. This is fleet-load behavior, not presentation
+fluff.
+
+### Missed Tasks
+
+On initial load, missed one-shot durable tasks are surfaced to the user and
+removed from disk. Recurring missed tasks are not surfaced the same way; the
+normal scheduler fires/reschedules them. The source logs
+`tengu_scheduled_task_missed` with count and task ids.
+
+### Scheduler Ownership
+
+The scheduler uses a lock so multiple Claude sessions in the same project do
+not double-fire the same durable file-backed task. Non-owning sessions can
+re-probe the lock every five seconds. Session-only tasks do not need the file
+lock because they are process-local.
+
+### Teammate Routing
+
+`useScheduledTasks.ts` routes tasks with `agentId` to the matching in-process
+teammate. If the teammate is gone or terminal, it removes the orphaned cron so a
+recurring session cron does not fire into nowhere until expiry. Durable teammate
+crons are rejected because teammates do not persist across sessions.
+
+### Daemon Boundary
+
+Daemon scheduled workers run from explicit directories and bypass bootstrap
+state. `createCronScheduler()` supports `dir`, `lockIdentity`, `onFireTask`,
+`onMissed`, and `filter` for daemon callers. This is why future docs should not
+assume every scheduler has a REPL, React hook, or in-memory session task store.

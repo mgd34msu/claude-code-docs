@@ -649,3 +649,191 @@ When extracting a later release, inspect these areas for team changes:
 8. Agent View helpers and transcript switching.
 9. memory directory team path behavior.
 10. telemetry events around team create/delete/spawn/message/failure.
+
+## Deep 2.1.141 Agent Teams Reconstruction
+
+Agent Teams in 2.1.141 are lead-centric swarms with persistent team files,
+team-scoped task lists, teammate identity, in-process or process-backed
+execution backends, and a mailbox protocol.
+
+### Source Map
+
+| Concern | Source |
+| --- | --- |
+| Feature enablement | `source/src/utils/agentSwarmsEnabled.ts` |
+| Tool registry | `source/src/tools.ts`, `source/src/constants/tools.ts` |
+| Team creation/deletion | `source/src/tools/TeamCreateTool`, `source/src/tools/TeamDeleteTool` |
+| Inter-agent messaging | `source/src/tools/SendMessageTool`, `source/src/utils/teammateMailbox.ts` |
+| Team file helpers | `source/src/utils/swarm/teamHelpers.ts` |
+| In-process spawn | `source/src/utils/swarm/spawnInProcess.ts` |
+| In-process task state | `source/src/tasks/InProcessTeammateTask` |
+| Agent spawn path | `source/src/tools/AgentTool/AgentTool.tsx` |
+| Teammate runner | `source/src/utils/swarm/inProcessRunner.ts` and backend registry |
+| Task tools | `source/src/tools/TaskCreateTool`, `TaskUpdateTool`, `TaskListTool`, `TaskGetTool` |
+| Teammate UI navigation | `source/src/hooks/useBackgroundTaskNavigation.ts`, `source/src/components/TeammateViewHeader.tsx` |
+| Team memory | `source/src/memdir/teamMemPaths.ts` |
+
+### Lead-Centric Model
+
+The lead creates one team at a time. `TeamCreate` refuses to create a second
+team if `appState.teamContext.teamName` already exists. A team file stores the
+lead as a member named `team-lead`, but the lead process intentionally does not
+set `CLAUDE_CODE_AGENT_ID`; doing so would make the lead look like a teammate
+and break inbox polling assumptions.
+
+`TeamCreate` performs these steps:
+
+1. Validate non-empty `team_name`.
+2. Generate a unique team name if the requested name already exists.
+3. Build deterministic lead id with `formatAgentId(team-lead, teamName)`.
+4. Resolve the lead model from current app state/default model settings.
+5. Write the team file with lead membership.
+6. Register the team for session cleanup.
+7. Reset and create the matching task-list directory.
+8. Set the leader team name so task tools use the team task list.
+9. Populate `appState.teamContext`.
+10. Emit `tengu_team_created`.
+
+### Team File Shape
+
+The team file stores:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Team name. |
+| `description` | Optional purpose text. |
+| `createdAt` | Timestamp. |
+| `leadAgentId` | Deterministic lead id. |
+| `leadSessionId` | Actual session id for discovery. |
+| `members` | Lead and teammate records. |
+
+Member records include agent id, display name, agent type, model, join time,
+tmux pane/session data for process backends, cwd, subscriptions, and active
+state. In-process teammates mirror identity in AppState instead of relying only
+on the file.
+
+### Tool Surface
+
+| Tool | Purpose | Enabled by |
+| --- | --- | --- |
+| `TeamCreate` | Create one lead-managed team and reset its task list. | Agent swarms gate. |
+| `TeamDelete` | Clean up team directories and task state after teammates are inactive. | Agent swarms gate. |
+| `SendMessage` | Write mailbox messages, shutdown requests/responses, and plan approval responses. | Agent swarms gate and teammate context. |
+| `TaskCreate` | Create team/session tasks and run `TaskCreated` hooks. | Todo V2 gate. |
+| `TaskUpdate` | Update/delete/block tasks and run completion hooks. | Todo V2 gate. |
+| `TaskList` | List visible non-internal tasks. | Todo V2 gate. |
+| `TaskGet` | Get task detail. | Todo V2 gate. |
+
+`SendMessage` accepts plain text messages and structured messages:
+
+| Structured type | Meaning |
+| --- | --- |
+| `shutdown_request` | Ask a teammate to shut down gracefully. |
+| `shutdown_response` | Approve or deny a shutdown request. |
+| `plan_approval_response` | Approve or reject a teammate plan-mode request. |
+
+### In-Process Teammate State
+
+`InProcessTeammateTaskState` contains:
+
+| Field group | Fields |
+| --- | --- |
+| Identity | `identity.agentId`, `agentName`, `teamName`, color, `planModeRequired`, parent session id. |
+| Execution | prompt, optional model, selected agent definition, abort controllers, cleanup callback. |
+| Plan mode | `awaitingPlanApproval`, teammate-specific `permissionMode`. |
+| Conversation mirror | capped `messages`, `pendingUserMessages`, in-progress tool use ids. |
+| UI | spinner verb, past tense verb. |
+| Lifecycle | idle flag, shutdown requested flag, idle callbacks. |
+| Progress | last reported tool/token counts. |
+
+The UI message mirror is capped at 50 messages. The full teammate transcript is
+elsewhere; the AppState mirror exists to support the zoomed transcript view
+without duplicating hundreds of turns for many agents.
+
+### In-Process Spawn Semantics
+
+`spawnInProcessTeammate()`:
+
+1. Formats agent id as `name@team`.
+2. Generates a task id with `in_process_teammate` prefix.
+3. Creates an independent abort controller so leader interrupts do not kill the teammate.
+4. Creates teammate AsyncLocalStorage context.
+5. Registers the agent in Perfetto tracing if enabled.
+6. Creates and registers an `InProcessTeammateTaskState`.
+7. Registers cleanup to abort the teammate on graceful shutdown.
+8. Returns task id, agent id, abort controller, and teammate context.
+
+The permission mode is normalized for teammates:
+
+| Parent mode / condition | Teammate mode |
+| --- | --- |
+| `planModeRequired` | `plan` |
+| parent `plan` | `default` unless plan required |
+| parent `dontAsk` | `default` |
+| other modes | inherited |
+
+This prevents in-process teammates from accidentally inheriting lead-only
+planning or no-ask semantics.
+
+### Allowed Tools For Teammates
+
+General async agents do not get the team/task coordination tools. In-process
+teammates get extra tools through `IN_PROCESS_TEAMMATE_ALLOWED_TOOLS`:
+
+| Tool | Why allowed for teammates |
+| --- | --- |
+| `TaskCreate` | Teammates create tasks in the shared team task list. |
+| `TaskGet` | Teammates inspect task details. |
+| `TaskList` | Teammates view team work. |
+| `TaskUpdate` | Teammates update ownership/status/blockers. |
+| `SendMessage` | Teammates communicate with lead and peers. |
+| Cron tools when `AGENT_TRIGGERS` | Teammate-created cron jobs route back to that teammate. |
+
+This is a key 2.1.141 distinction. A doc that only lists the base agent tool
+allowlist misses the team-specific extension.
+
+### UI Navigation
+
+`useBackgroundTaskNavigation()` implements the interactive teammate UI:
+
+| Key | Behavior |
+| --- | --- |
+| Shift+Up/Shift+Down | Cycle leader, teammates, and hide row; wraps. |
+| Enter | Confirm selected leader/teammate/hide row. |
+| `f` | View selected teammate transcript. |
+| `k` | Kill selected running teammate. |
+| Escape in selecting mode | Leave selection mode. |
+| Escape in viewing mode | Abort current teammate work if running; otherwise exit transcript view. |
+
+`TeammateViewHeader` shows the viewed teammate, color, exit hint, and prompt.
+`teammateViewHelpers.ts` also handles retain/eviction behavior for local agent
+transcript views, so terminal views do not drop a transcript while the user is
+reading it.
+
+### Task Hooks Integration
+
+Task creation and completion are hook-aware:
+
+| Action | Hook behavior |
+| --- | --- |
+| `TaskCreate` | Runs `TaskCreated` hooks. If any blocking errors occur, deletes the task and throws. |
+| `TaskUpdate` to completed | Runs `TaskCompleted` hooks before accepting completion. |
+| Teammate idle | `TeammateIdle` hooks can block idling and make teammate continue. |
+
+This makes task hooks part of the team orchestration model, not just general
+automation hooks.
+
+### Cleanup Rules
+
+`TeamDelete` refuses cleanup when non-lead members are still active. It only
+counts non-lead members with `isActive !== false` as active. Successful cleanup:
+
+1. Removes team directories.
+2. Unregisters session cleanup for the team.
+3. Clears teammate colors.
+4. Clears leader team name so task list falls back to session id.
+5. Emits `tengu_team_deleted`.
+6. Clears `teamContext` and inbox state.
+
+The session cleanup registry exists because session-created teams otherwise
+would remain on disk indefinitely if the lead never called `TeamDelete`.

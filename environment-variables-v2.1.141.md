@@ -218,7 +218,7 @@ Foundry:
 - `HOME`
 
 Hook subprocesses also receive Claude-provided context variables; see
-`hooks-v2.1.141.md` for exact hook execution contracts.
+`claude-hooks-reference-v2.1.141.md` for exact hook execution contracts.
 
 ## Remote, Bridge, CCR, and Daemon
 
@@ -852,3 +852,151 @@ For a future version, rebuild this file by:
    test-only, or provider-specific.
 10. Validating that stale variables from older releases are not carried forward
     unless 2.1.141 source still references them.
+
+## Deep 2.1.141 Environment Variable Audit
+
+The 2.1.141 source references hundreds of environment variables. A useful
+reference must separate user-facing controls from internal propagation,
+provider credentials, test flags, and build/runtime feature toggles.
+
+### High-Impact User/Operator Variables
+
+| Variable | Source area | Purpose |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | auth/client/onboarding | Direct API key auth. |
+| `ANTHROPIC_AUTH_TOKEN` | API client/auth | OAuth/session auth token path. |
+| `ANTHROPIC_BASE_URL` | API, bridge upload, GrowthBook | Base URL override. |
+| `ANTHROPIC_MODEL` | model selection/logging | Main model override. |
+| `ANTHROPIC_SMALL_FAST_MODEL` | model selection/logging | Small/fast model override. |
+| `ANTHROPIC_BETAS` | beta header handling | Extra beta header control. |
+| `ANTHROPIC_CUSTOM_HEADERS` | API client | Custom request headers. |
+| `CLAUDE_CONFIG_DIR` | env/config/keychain/daemon | Root config directory override. |
+| `CLAUDE_CODE_SIMPLE` | CLI/main/prompts | Minimal/bare runtime behavior. |
+| `CLAUDE_CODE_USE_BEDROCK` | provider/auth/status | Select Bedrock provider path. |
+| `CLAUDE_CODE_USE_VERTEX` | provider/auth/status | Select Vertex provider path. |
+| `CLAUDE_CODE_USE_FOUNDRY` | provider/auth/status | Select Foundry provider path. |
+| `CLAUDE_CODE_REMOTE` | remote/CCR/main/print | Remote execution mode flag. |
+| `CLAUDE_CODE_BRIEF` | main/Brief/spinner | Force/activate Brief behavior for dev/testing. |
+| `CLAUDE_CODE_DISABLE_CLAUDE_MDS` | context | Disable CLAUDE.md loading. |
+| `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` | tools/prompts/background | Disable background task surface. |
+| `CLAUDE_CODE_DISABLE_FAST_MODE` | fast mode/query config | Disable fast mode. |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | privacy/registry | Reduce nonessential network traffic. |
+| `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` | print/stop hooks/prompt suggestion | Enable prompt suggestion surfaces. |
+| `CLAUDE_CODE_ENABLE_TASKS` | task tools | Enable task list V2 behavior. |
+| `CLAUDE_CODE_EFFORT_LEVEL` | effort command/runtime | Reasoning effort override. |
+| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | query/API | Max output tokens override. |
+| `CLAUDE_CODE_MAX_RETRIES` | API retry | Retry count override. |
+| `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` | hooks | SessionEnd hook timeout override. |
+| `CLAUDE_CODE_SHELL` | shell selection | Shell override. |
+| `CLAUDE_CODE_TMPDIR` | shell/image/permissions/temp | Temp directory override. |
+| `CLAUDE_CODE_WORKSPACE_HOST_PATHS` | telemetry/events | Host path mapping metadata. |
+
+### Provider Variables
+
+| Provider | Variables observed |
+| --- | --- |
+| Bedrock | `CLAUDE_CODE_USE_BEDROCK`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `ANTHROPIC_BEDROCK_BASE_URL`, `BEDROCK_BASE_URL`, `CLAUDE_CODE_SKIP_BEDROCK_AUTH` |
+| Vertex | `CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLAUDE_CODE_SKIP_VERTEX_AUTH` |
+| Foundry | `CLAUDE_CODE_USE_FOUNDRY`, `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_FOUNDRY_BASE_URL`, `ANTHROPIC_FOUNDRY_RESOURCE`, `CLAUDE_CODE_SKIP_FOUNDRY_AUTH` |
+| First-party/OAuth | `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `CLAUDE_CODE_OAUTH_CLIENT_ID`, `CLAUDE_CODE_OAUTH_SCOPES`, `CLAUDE_CODE_CUSTOM_OAUTH_URL`, `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` |
+
+### Feature And Mode Variables
+
+| Variable | Area |
+| --- | --- |
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | Agent swarms/teams enablement. |
+| `CLAUDE_CODE_AGENT` | Main-thread agent type. |
+| `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` | Agent prompt/message behavior. |
+| `CLAUDE_AUTO_BACKGROUND_TASKS` | Agent/background task behavior. |
+| `CLAUDE_CODE_COORDINATOR_MODE` | Coordinator mode. |
+| `CLAUDE_CODE_DISABLE_AGENT_VIEW` | Agent View disable path. |
+| `CLAUDE_CODE_DISABLE_CRON` | Cron/scheduled tasks disable path. |
+| `CLAUDE_CODE_DISABLE_MESSAGE_ACTIONS` | UI message actions. |
+| `CLAUDE_CODE_DISABLE_MOUSE` | Fullscreen/mouse handling. |
+| `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` | Terminal title updates. |
+| `CLAUDE_CODE_DISABLE_VIRTUAL_SCROLL` | Virtual scrolling. |
+| `CLAUDE_CODE_ENABLE_AWAY_SUMMARY` | Away summary service. |
+| `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING` | API/tool streaming detail. |
+| `CLAUDE_CODE_ENABLE_TOKEN_USAGE_ATTACHMENT` | Token usage attachment. |
+| `CLAUDE_CODE_ENABLE_XAA` | MCP XAA path. |
+| `CLAUDE_CODE_USE_NATIVE_FILE_SEARCH` | Native file search path. |
+
+### Auto Mode And Permission Variables
+
+| Variable | Area |
+| --- | --- |
+| `CLAUDE_CODE_AUTO_MODE_MODEL` | Auto-mode classifier model override. |
+| `CLAUDE_CODE_DUMP_AUTO_MODE` | Dumps classifier request/response JSON for internal diagnostics. |
+| `CLAUDE_CODE_TWO_STAGE_CLASSIFIER` | Two-stage classifier mode selection. |
+| `CLAUDE_CODE_JSONL_TRANSCRIPT` | Auto-mode classifier transcript serialization mode. |
+| `CLAUDE_CODE_ADDITIONAL_PROTECTION` | API/client additional protection. |
+| `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` | Subprocess environment scrubbing. |
+| `CLAUDE_CODE_DISABLE_COMMAND_INJECTION_CHECK` | Bash permission/security path. |
+| `CLAUDE_CODE_BASH_SANDBOX_SHOW_INDICATOR` | Bash sandbox UI indicator. |
+| `CLAUDE_CODE_BUBBLEWRAP` | Bubblewrap sandbox path. |
+
+### Hooks And Context Variables
+
+| Variable | Area |
+| --- | --- |
+| `CLAUDE_ENV_FILE` | Hook/session environment side channel. |
+| `CLAUDE_CODE_SAVE_HOOK_ADDITIONAL_CONTEXT` | Persist hook additional context. |
+| `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` | SessionEnd hook timeout. |
+| `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` | Additional CLAUDE.md directories. |
+| `CLAUDE_CODE_DISABLE_CLAUDE_MDS` | Disable CLAUDE.md loading. |
+| `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | Disable auto-memory. |
+| `CLAUDE_CODE_REMOTE_MEMORY_DIR` | Remote memory directory. |
+| `CLAUDE_CODE_REMOTE_SEND_KEEPALIVES` | Remote session activity. |
+
+### Bridge, Remote, And Harness Variables
+
+| Variable | Area |
+| --- | --- |
+| `CLAUDE_BRIDGE_BASE_URL` | Bridge base URL. |
+| `CLAUDE_BRIDGE_OAUTH_TOKEN` | Bridge OAuth token. |
+| `CLAUDE_BRIDGE_SESSION_INGRESS_URL` | Bridge ingress. |
+| `CLAUDE_BRIDGE_USE_CCR_V2` | Bridge CCR V2 path. |
+| `CLAUDE_CODE_SESSION_ACCESS_TOKEN` | Session ingress/remote bridge auth. |
+| `CLAUDE_CODE_REMOTE_SESSION_ID` | Remote session id propagation. |
+| `CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE` | Remote environment metadata. |
+| `CLAUDE_CODE_ENVIRONMENT_KIND` | Environment kind metadata/output scanner. |
+| `CLAUDE_CODE_ENVIRONMENT_RUNNER_VERSION` | Environment runner metadata. |
+| `CLAUDE_CODE_POST_FOR_SESSION_INGRESS_V2` | Session ingress transport. |
+| `CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR` | WebSocket auth fd. |
+
+### Internal Propagation Variables
+
+These variables are meaningful in 2.1.141 source but are mostly used to pass
+state between Claude Code processes, workers, bridge sessions, or launched
+subprocesses:
+
+| Variable | Meaning |
+| --- | --- |
+| `CLAUDE_CODE_ENTRYPOINT` | Entrypoint classification. |
+| `CLAUDE_CODE_ACTION` | CLI action metadata. |
+| `CLAUDE_CODE_PATH` | SDK/process path propagation. |
+| `CLAUDE_CODE_TASK_LIST_ID` | Task list selection. |
+| `CLAUDE_CODE_SESSION_ID` | Session id propagation. |
+| `CLAUDE_CODE_SESSION_KIND` | Concurrent session kind. |
+| `CLAUDE_CODE_SESSION_NAME` | Concurrent session display name. |
+| `CLAUDE_CODE_SESSION_LOG` | Session log path. |
+| `CLAUDE_CODE_AGENT_SDK_VERSION` | SDK version metadata. |
+| `CLAUDE_AGENT_SDK_CLIENT_APP` | SDK client app metadata. |
+| `CLAUDE_AGENT_SDK_MCP_NO_PREFIX` | SDK MCP tool-name compatibility mode. |
+| `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS` | SDK built-in agent suppression. |
+
+### Classification Rules For Future Docs
+
+When adding variables for later releases, classify each source reference as:
+
+| Class | Examples |
+| --- | --- |
+| Secret-bearing | API keys, OAuth tokens, fd-based credentials, client cert/key. |
+| Provider selector | Bedrock, Vertex, Foundry, Mantle, first-party. |
+| User-facing feature control | Brief, tasks, prompt suggestion, background tasks, shell/tool toggles. |
+| Internal propagation | Session ids, bridge tokens, entrypoint/action state. |
+| Test/dev diagnostic | dumps, profiling, fixtures, debug logs. |
+| Build/runtime gate | Variables that expose code behind build flags or internal feature flags. |
+
+This prevents stale docs from presenting internal process plumbing as a stable
+user interface.

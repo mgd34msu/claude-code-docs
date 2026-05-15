@@ -129,7 +129,7 @@ Sometimes relevant:
 - `source/src/utils/messages/systemInit.ts`
 - `source/src/utils/permissions/permissionRuleParser.ts`
 - `source/src/services/tools/toolHooks.ts`
-- `hooks-v2.1.141.md`
+- `claude-hooks-reference-v2.1.141.md`
 
 ## Complete Execution Flow
 
@@ -148,7 +148,7 @@ conversation type from the hook system's point of view.
 
 ## Hook Input Fields to Expect
 
-The exact schema is in `hooks-v2.1.141.md`, but for this use case the important
+The exact schema is in `claude-hooks-reference-v2.1.141.md`, but for this use case the important
 fields are:
 
 - session id.
@@ -384,3 +384,101 @@ For a later release:
 8. Verify SDK task termination events.
 9. Verify hook additional-context merge behavior.
 10. Test synchronous and async agents separately.
+
+## Deep 2.1.141 Agent-Finish Injection Addendum
+
+There is no single built-in hook literally named `AfterAgentFinish`. In 2.1.141
+the practical patterns are composed from tool hooks, task notifications,
+queue-drain behavior, and SDK task events.
+
+### Synchronous Agent Tool Calls
+
+For a normal `Agent` tool call that completes synchronously within the assistant
+turn:
+
+- `PreToolUse` can observe or block the `Agent` call before launch.
+- `PostToolUse` can observe the returned agent result.
+- `PostToolUseFailure` can observe failed tool execution.
+- `updatedToolOutput` can modify the result visible to the model.
+- `additionalContext` can add follow-up context to the next request.
+- blocking hook output can stop continuation.
+
+The matcher should use the canonical current tool name. If supporting older
+transcripts/configs, verify aliases in `AgentTool` and legacy-name normalization
+rather than assuming `Task` is still canonical.
+
+### Asynchronous Or Background Agent Calls
+
+If an agent is launched as background work, the immediate `Agent` tool result is
+not the final agent answer. The final output arrives through task state and
+queued notifications. Relevant source areas include:
+
+- `tasks/LocalAgentTask/LocalAgentTask.tsx`.
+- `utils/task/framework.ts`.
+- `utils/messageQueueManager.ts`.
+- `query.ts` queued notification drain.
+- `cli/print.ts` task event drain and held-back result logic.
+- `components/CoordinatorAgentStatus.tsx`.
+
+For background agents, a `PostToolUse` hook on `Agent` observes launch result,
+not necessarily final task completion. A completion injection should listen for
+the task notification path or use SDK `task_notification`/`task_progress`
+messages in stream-json.
+
+### Queue Drain Timing
+
+`query.ts` drains queued task notifications after tool execution and before the
+next model request. The drain is scoped:
+
+- main thread drains main-thread prompts/notifications.
+- subagents drain only task notifications addressed to their own agent id.
+- slash commands are not injected mid-turn.
+- `Sleep` changes max priority from `next` to `later`, letting later task notifications drain.
+
+That means "inject after finish" can occur inside the next assistant turn if the
+completion becomes a queued attachment before the next API call.
+
+### Hook Output Shape
+
+For a hook-based injection, use structured hook output rather than printing
+freeform text. Depending on event type and desired behavior, relevant fields
+are:
+
+- `additionalContext`.
+- `systemMessage`.
+- `blockingError`.
+- `decision`.
+- `updatedToolOutput`.
+- `updatedMCPToolOutput`.
+- hook-specific permission or elicitation output.
+
+For `PostToolUse` on `Agent`, `additionalContext` is usually the safest way to
+append model-visible context without pretending to be user input.
+
+### Print/SDK Visibility
+
+In stream-json print mode, task progress and task notifications are SDK-visible.
+`cli/print.ts` drains SDK events before command queue processing and can hold
+the final result until background agents finish. This means SDK consumers can
+implement after-agent-finish behavior without filesystem polling if they listen
+to task events.
+
+### Failure Boundaries
+
+Document these separately:
+
+- failed `Agent` launch: `PostToolUseFailure`.
+- successful launch with an error result: `PostToolUse` sees the result as tool output.
+- successful async launch later failing: task notification/failure path.
+- user stop/kill: task status path, not necessarily a tool failure.
+- permission denied before launch: `PermissionDenied` or `PreToolUse`/permission path.
+
+### Recommended Pattern
+
+For 2.1.141, the robust pattern is:
+
+1. Use `PreToolUse`/`PostToolUse` only for launch-time behavior.
+2. Use task notifications or SDK task events for final background completion.
+3. Inject model-visible context with `additionalContext` or queued notification, not by mutating transcript files.
+4. Keep agent id/task id in the payload so multiple background agents do not collide.
+5. In stream-json harnesses, prefer protocol events over terminal text parsing.

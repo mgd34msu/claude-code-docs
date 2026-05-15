@@ -973,3 +973,179 @@ claude -p --resume <session-id> --rewind-files <user-message-uuid>
 - Telemetry tracks print usage through `tengu_init.print`, print-specific
   resume events, query source `sdk`, headless latency events, HTTP user-agent
   fields, attribution headers, and global metadata.
+
+## Deep 2.1.141 Print/SDK Runtime Addendum
+
+The 2.1.141 `-p` path is implemented mostly in `main.tsx`, `cli/print.ts`,
+`cli/structuredIO.ts`, `cli/transports/*`, and `entrypoints/sdk/*`. It is the
+same path used by the Agent SDK subprocess protocol, not a separate lightweight
+request wrapper.
+
+### CLI Option Contract
+
+`main.tsx` defines:
+
+- `-p, --print`: print response and exit.
+- `--output-format text|json|stream-json`: only meaningful with `--print`.
+- `--input-format text|stream-json`: only meaningful with `--print`.
+- `--json-schema <schema>`: structured-output schema validation.
+- `--include-hook-events`: include all hook lifecycle events in stream-json output.
+- `--include-partial-messages`: include partial chunks with print/stream-json.
+- `--max-turns`, `--max-budget-usd`, `--task-budget`: non-interactive execution caps.
+- `--replay-user-messages`: re-emit stdin user messages for stream-json ack.
+- `--permission-prompt-tool`: use an MCP tool for permission prompts.
+- `--workload`: hidden billing/workload attribution tag.
+- `--sdk-url`: hidden remote WebSocket endpoint for SDK I/O streaming.
+
+`--sdk-url` forces the process into print mode if the caller did not explicitly
+set `--print`, defaults both input and output formats to `stream-json`, and
+defaults verbose mode on. It also relaxes local UUID validation for
+`--session-id`, because the remote session id may be server-assigned rather than
+a local UUID.
+
+### Validation And Failure-Closed Cases
+
+The source enforces several hard constraints before the run loop:
+
+- `--input-format=stream-json` requires `--output-format=stream-json`.
+- `--sdk-url` requires both input and output to be `stream-json`.
+- `--replay-user-messages` requires stream-json input and output.
+- `--include-partial-messages` requires `--print` and `--output-format=stream-json`.
+- `--output-format=stream-json` requires `--verbose`.
+- a normal print run needs either stdin/prompt input, a valid resume target, or `--sdk-url`.
+- `--rewind-files` requires `--resume` and cannot be combined with a prompt.
+- `--resume-session-at` requires `--resume`.
+- `--no-session-persistence` is only valid with print mode.
+
+Those checks are important for automation because malformed SDK invocations exit
+early rather than falling back to interactive behavior.
+
+### Stdout Discipline
+
+`cli/print.ts` installs a stream-json stdout guard before the first structured
+write. The reason is explicit in the source: any stray `console.log`, dependency
+banner, or debug line would corrupt the line-by-line JSON parser used by SDK
+clients. Non-JSON stdout is diverted to stderr in stream-json mode.
+
+That makes `stream-json` a protocol boundary. Docs and future maps should not
+treat stdout as generic log output once this mode is active.
+
+### Output Modes
+
+The output modes differ materially:
+
+- `text`: writes only the final successful result text, with a trailing newline.
+- `json`: writes the final `result` message unless `--verbose` requests the full message array.
+- `stream-json`: writes structured messages during execution and does not print a final extra wrapper after the stream.
+
+During streaming, print mode suppresses some internal/system-only messages from
+the `lastMessage` calculation so the final text/json result is not replaced by
+late `session_state_changed`, `task_notification`, `task_started`,
+`task_progress`, `post_turn_summary`, `stream_event`, `keep_alive`,
+`prompt_suggestion`, or streamlined output messages.
+
+### Hook Event Streaming
+
+When output is `stream-json` and verbose, print mode registers a hook event
+handler that emits:
+
+- `system/hook_started`.
+- `system/hook_progress`.
+- `system/hook_response`.
+
+Each event includes hook id/name/event plus stdout/stderr/output/exit/outcome
+fields as appropriate. The `--include-hook-events` flag, or
+`CLAUDE_CODE_REMOTE`, enables all hook event types rather than the limited
+startup subset. This is why hook docs should treat stream-json as a first-class
+observability surface.
+
+### Permission Prompt Routing
+
+Print mode does not show the interactive terminal permission dialog. It builds
+`canUseTool` through `getCanUseToolFn()` with either:
+
+- a configured MCP permission-prompt tool.
+- `stdio` when `--sdk-url` is active.
+- the normal non-interactive permission mode and rules otherwise.
+
+When a permission prompt is shown, `notifySessionStateChanged('requires_action',
+details)` is called. With SDK transport this becomes a control request for the
+host. With bridge/remote transport it can be relayed to the remote UI. The
+prompt path increments attribution counters when the commit-attribution feature
+is active.
+
+### MCP And Dynamic SDK Control
+
+The headless loop maintains several mutable MCP sets:
+
+- startup MCP clients from config.
+- SDK MCP clients declared by the SDK initialize request.
+- dynamically managed MCP servers from `mcp_set_servers` control messages.
+- plugin-driven MCP changes after plugin state refresh.
+
+The print loop caches SDK MCP clients, registers elicitation handlers for
+non-SDK MCP servers, supports MCP status/control requests, and keeps
+`appState.mcp.tools` synchronized so subagents can see SDK MCP tools. It also
+routes SDK MCP elicitation through `SdkControlClientTransport` instead of the
+normal in-terminal dialog.
+
+### Stream Input Queue
+
+With stream-json input, stdin messages are deduplicated by UUID against both
+transcript history and runtime receipt. Historical duplicates can be acked when
+`--replay-user-messages` is enabled and close the command lifecycle without
+re-running the prompt. New messages are enqueued with:
+
+- `mode: prompt`.
+- caller-supplied priority.
+- resolved/prepended file attachments when present.
+- message UUID and timestamp.
+
+This makes print mode suitable for a long-lived SDK worker, not just a single
+prompt invocation.
+
+### Background Agents In Print Mode
+
+The headless loop deliberately holds back the final `result` while background
+local agents or workflows are still running. It drains SDK events before command
+queue processing so `task_started` and `task_progress` appear before
+`task_notification`. Teammates are excluded from the "wait before exit" path
+because they are long-lived by design.
+
+This affects automation harnesses: a print run can remain alive after the main
+assistant text is available if background work must report completion first.
+
+### Prompt Suggestions In Print/SDK
+
+Prompt suggestions are not TUI-only in 2.1.141. If `options.promptSuggestions`
+is set and `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` is not explicitly false,
+print mode can generate a `prompt_suggestion` message after a turn. It uses
+`getLastCacheSafeParams()` so the suggestion request can reuse a stable prompt
+prefix. If a final result is held for background agents, the suggestion is
+deferred so it appears after the result.
+
+### Rewind And Read-State Cache
+
+`--rewind-files` restores file state to a target user message and exits. The
+normal print loop also seeds `readFileState` from transcript content and merges
+pending seeds into the cache before `ask()`. This is a correctness feature for
+headless edit sessions: file-state knowledge survives across multiple queued
+turns in one print process.
+
+### Telemetry Surface
+
+The print path can contribute telemetry from:
+
+- root `tengu_init` fields such as `print`, input/output formats, and mode flags.
+- `tengu_code_prompt_ignored` for the special `code` prompt case.
+- `tengu_single_word_prompt` for single-token prompts.
+- `tengu_structured_output_enabled` and `tengu_structured_output_failure`.
+- headless profiler checkpoints and query profile reports.
+- permission prompt attribution count.
+- SDK/no-params prompt suggestion suppressions.
+- background task counts in worker status.
+- stream/protocol lifecycle diagnostics in CCR transport.
+
+The docs should continue to separate telemetry metadata from streamed SDK
+messages. Some telemetry is local analytics; some stream messages are protocol
+events visible to the SDK host.

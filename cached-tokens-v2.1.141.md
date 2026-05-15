@@ -428,3 +428,120 @@ For a later release:
 9. Inspect SDK usage schemas.
 10. Verify all cache fields are documented with exact names and not collapsed
     into a single "cached tokens" number.
+
+## Deep 2.1.141 Token And Cache Accounting Addendum
+
+The 2.1.141 source has several distinct concepts that are easy to collapse
+incorrectly:
+
+- API usage fields reported by model responses.
+- local cost tracking.
+- prompt-cache reads and writes.
+- cache deletion from cached microcompact.
+- read-file state cache for file tools.
+- memoized config/auth/tool/schema caches.
+- cache-safe parameters for prompt suggestions and speculation.
+
+Only the first three are "cached tokens" in the ordinary billing/accounting
+sense.
+
+### Usage Field Semantics
+
+The query path reads usage from assistant messages and compaction responses. The
+important fields surfaced in source include:
+
+- `input_tokens`.
+- `output_tokens`.
+- `cache_read_input_tokens`.
+- `cache_creation_input_tokens`.
+- `cache_deleted_input_tokens`.
+
+Compaction total token math in `query.ts` adds input, cache creation, cache
+read, and output fields. Cached microcompact compares cumulative
+`cache_deleted_input_tokens` against a baseline so it can compute how many
+cached tokens were actually deleted by a cache edit.
+
+### Cached Microcompact
+
+When `feature('CACHED_MICROCOMPACT')` is active, microcompact can produce
+pending cache edits. The main query loop waits until the next API response to
+read actual `cache_deleted_input_tokens`. This is necessary because local token
+estimation cannot know the server-side cache-deletion result.
+
+Future documentation should not describe cached microcompact as "removes N
+tokens" unless it specifies whether N is estimated, requested, or confirmed by
+`cache_deleted_input_tokens`.
+
+### Stale Usage Guard
+
+The query loop explicitly avoids using stale `input_tokens` from kept messages
+when checking compaction/context limits. The source comment calls out a prior
+failure mode where a session could compact successfully but kept messages still
+carried stale pre-compaction usage above the blocking limit. That means usage
+metadata on old messages is not always the current context size.
+
+### Cache-Safe Params
+
+`utils/forkedAgent.ts` creates `CacheSafeParams`, and print/SDK paths use
+`getLastCacheSafeParams()` for prompt suggestions. The goal is to run follow-on
+requests with a stable prefix so prompt-cache hits are possible. Consumers
+include:
+
+- prompt suggestions.
+- speculation.
+- away summaries.
+- SDK push suggestions after print turns.
+
+Cache-safe does not mean "no state changed." It means the request has the data
+needed to form a prompt prefix compatible with the cached parent request.
+
+### Read File State Cache
+
+`cli/print.ts` creates and maintains a `readFileState` cache across headless
+turns. It also tracks pending seeds and merges them into the cache before
+`ask()`. This cache is about file contents the model has already seen, not API
+prompt-cache tokens. It prevents unnecessary rereads and helps edit correctness
+in long-running print/SDK sessions.
+
+### Tool Schema And Deferred Tool Cache
+
+Tool schema token cost is influenced by tool selection and deferral:
+
+- deferred tools do not all enter the initial prompt.
+- `ToolSearch` can reveal deferred tools later.
+- MCP tools can connect late or be refreshed by SDK control messages.
+- plugin reload clears relevant command/agent/hook/tool caches.
+
+Token accounting for tools should therefore identify whether it is measuring
+all registered tools, currently loaded tools, deferred tool descriptions, or
+MCP tools exposed to the current turn.
+
+### Auth And Settings Caches Are Not Token Caches
+
+The source has many caches around OAuth tokens, keychain reads, API key helpers,
+Bedrock/GCP credentials, remote settings, policy limits, plugin state, commands,
+and GrowthBook values. These affect behavior and latency, but they are not
+cached-token billing metrics. They can indirectly affect prompt-cache hits by
+changing system prompt, tools, settings, or provider, but they should be
+documented separately.
+
+### Practical Accounting Rules
+
+Use these rules when reading 2.1.141 telemetry or future source:
+
+- If the field is `cache_read_input_tokens`, it means input tokens served from prompt cache.
+- If the field is `cache_creation_input_tokens`, it means input tokens written into prompt cache.
+- If the field is `cache_deleted_input_tokens`, it means server-confirmed cache deletion.
+- If the code says `readFileState`, it is a local file-content cache.
+- If the code says `memoize`, `cache.clear`, or "cached" around config/auth/plugins, it is usually not token accounting.
+- If a cost function receives usage, inspect whether it includes cache-read and cache-creation tokens in the total.
+- If a prompt suggestion or speculation call reuses cache-safe params, inspect whether it sets `skipCacheWrite`.
+
+### Future Map Guidance
+
+For future releases, the high-value map anchors are `query.ts`,
+`utils/tokens.ts`, `services/cost-tracker.ts`, `utils/forkedAgent.ts`,
+`services/PromptSuggestion/*`, `cli/print.ts`, `utils/toolSearch.ts`, SDK usage
+schemas, and any new API response normalizer. The map should preserve the exact
+field names because downstream billing and performance docs depend on those
+names.

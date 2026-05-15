@@ -516,3 +516,97 @@ For a later version:
 8. Record managed setting overrides.
 9. Record auth/trust refresh behavior.
 10. Diff high-risk gate areas manually, not only by string name.
+
+## Deep 2.1.141 Gate Audit
+
+2.1.141 has three different "gates" that should not be collapsed:
+build-time `feature(...)` flags, runtime GrowthBook/Statsig values, and
+managed settings/policy checks.
+
+### Build-Time Feature Flags
+
+Build-time flags are read through `feature("NAME")` from `bun:bundle`. They are
+used for dead-code elimination and conditional imports.
+
+| Flag | Area |
+| --- | --- |
+| `KAIROS` | Assistant mode, Brief dependency, channels dependency, assistant team context. |
+| `KAIROS_BRIEF` | Standalone Brief/SendUserMessage surface. |
+| `KAIROS_CHANNELS` | Channels outside full Kairos. |
+| `KAIROS_PUSH_NOTIFICATION` | Push notification tool. |
+| `KAIROS_DREAM` | Dream bundled skill. |
+| `AGENT_TRIGGERS` | Cron tools and bundled scheduling skills. |
+| `AGENT_TRIGGERS_REMOTE` | RemoteTrigger tool. |
+| `MONITOR_TOOL` | Monitor tool. |
+| `TRANSCRIPT_CLASSIFIER` | Auto mode permission/classifier system. |
+| `BASH_CLASSIFIER` | Bash classifier prompt rule integration. |
+| `CONTEXT_COLLAPSE` | Context inspection/collapse tool path. |
+| `COORDINATOR_MODE` | Coordinator tool policy and system prompt behavior. |
+| `HISTORY_SNIP` | Snip tool. |
+| `BRIDGE_MODE` | Bridge upload/remote integration code paths. |
+| `BG_SESSIONS` | Agent View/background session fast paths. |
+
+If a flag controls a conditional `require()`, the code may be absent from a
+given build even though the reconstructed source contains it.
+
+### Runtime GrowthBook Controls
+
+Runtime controls are read through helpers in `services/analytics/growthbook.ts`.
+The helper choice matters:
+
+| Helper pattern | Behavior |
+| --- | --- |
+| `getFeatureValue_CACHED_MAY_BE_STALE` | Fast cached value, may trigger/lag refresh. |
+| `getFeatureValue_CACHED_WITH_REFRESH` | Cached with explicit refresh interval. |
+| `getDynamicConfig_BLOCKS_ON_INIT` | Blocks startup/init until config is loaded. |
+| `checkStatsigFeatureGate_CACHED_MAY_BE_STALE` | Boolean cached gate. |
+| Security restriction helpers | Security-policy-specific gate checks. |
+
+### High-Risk Runtime Keys
+
+| Key | Area |
+| --- | --- |
+| `tengu_auto_mode_config` | Auto-mode availability/config, including force external permissions. |
+| `tengu_kairos_brief` | Brief entitlement kill switch. |
+| `tengu_kairos_brief_config` | Brief slash-command visibility. |
+| `tengu_harbor` | Overall MCP channels runtime gate. |
+| `tengu_harbor_ledger` | Channel plugin allowlist. |
+| `tengu_harbor_permissions` | Channel permission relay gate. |
+| `tengu_kairos_cron` | Cron/scheduled task availability. |
+| `tengu_kairos_cron_durable` | Durable scheduled task behavior. |
+| `tengu_disable_bypass_permissions_mode` | Disables bypass permission mode. |
+| Prompt suggestion configs | Prompt suggestion/speculation behavior. |
+| Auto dream configs | Auto dream trigger and consolidation behavior. |
+
+### Managed Settings Overlays
+
+Managed settings can replace or override runtime gate results:
+
+| Managed setting | Effect |
+| --- | --- |
+| `channelsEnabled` | Team/Enterprise opt-in for channel notifications. |
+| `allowedChannelPlugins` | Replaces the GrowthBook channel ledger for managed orgs. |
+| `disableAllHooks` | Disables hooks and status line. |
+| `allowManagedHooksOnly` | Ignores user/project/local hooks. |
+| `strictPluginOnlyCustomization` | Locks customization surfaces such as hooks, plugins, skills, commands. |
+| `permissions.disableBypassPermissionsMode` | Disables bypass mode unless a higher-priority gate already does. |
+| HTTP hook allowlists | Restricts HTTP hook URLs and header env interpolation. |
+
+This means a runtime gate being true is not enough to prove user-visible
+availability. Channels are the clearest example: `tengu_harbor` can be true,
+but a Team/Enterprise org without `channelsEnabled: true` still blocks channel
+registration.
+
+### Gate Reading Checklist
+
+For future releases:
+
+1. Extract all `feature("...")` strings.
+2. Extract all GrowthBook feature and dynamic config keys.
+3. Extract managed settings schema additions.
+4. Identify whether a gate controls import, UI visibility, runtime execution,
+   entitlement, or telemetry only.
+5. Record refresh behavior because cached gates can lag mid-session.
+6. Check for env-var overrides that bypass runtime gates for development.
+7. Check for policy overrides that can disable features even when runtime gates
+   are enabled.

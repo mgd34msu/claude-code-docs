@@ -472,3 +472,117 @@ For a later release:
 8. Inspect SDK/print schemas for prompt suggestion events.
 9. Inspect session storage for speculation accept entries.
 10. Inspect telemetry event names and cache-usage metadata.
+
+## Deep 2.1.141 Dream/Speculation Addendum
+
+The 2.1.141 source has three adjacent systems that should not be collapsed:
+
+- `/dream` bundled skill and auto-dream memory consolidation.
+- prompt suggestion generation.
+- speculative execution of a suggested next prompt.
+
+They share cache-safe prompt state and background-task UI, but they solve
+different problems.
+
+### Dream Skill
+
+`skills/bundled/dream.ts` registers the bundled `dream` skill with alias
+`learn`. It is enabled only when:
+
+- Kairos is not active.
+- auto memory is enabled.
+- GrowthBook key `tengu_kairos_dream` is true on a five-minute refresh window.
+
+The skill has two major modes:
+
+- schedule mode for `nightly`, `schedule`, or `overnight` arguments.
+- consolidation mode for normal `/dream` or `/learn` usage.
+
+Schedule mode first instructs the model to list existing cron jobs, delete any
+existing `"/dream consolidate"` job, create a recurring durable cron, confirm
+the schedule to the user, and then run immediate consolidation. The
+`consolidate` suffix is intentional because it prevents the scheduled run from
+matching the scheduling trigger path again.
+
+### Dream Task UI
+
+`tasks/DreamTask/DreamTask.ts` makes auto-dream visible as a background task.
+It tracks:
+
+- status.
+- phase: `starting` or `updating`.
+- sessions reviewed.
+- files touched.
+- a capped list of assistant turns.
+- abort controller.
+- prior lock mtime for rollback.
+
+The file explicitly notes that `filesTouched` is incomplete because it only
+captures Edit/Write tool-use blocks and misses bash-mediated writes. Docs must
+not present it as a full file-change list.
+
+Dream completion is UI-only: `completeDreamTask()` sets `notified: true`
+immediately because the dream task has no separate model-facing notification
+path. Killing a dream task aborts the controller and rolls back the
+consolidation lock mtime so a later session can retry.
+
+### Prompt Suggestion Gate
+
+`services/PromptSuggestion/promptSuggestion.ts` enables suggestions through:
+
+- env override `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION`.
+- GrowthBook key `tengu_chomp_inflection`.
+- non-interactive exclusion for default CLI suggestion UI.
+- swarm teammate exclusion.
+- user setting `promptSuggestionEnabled`.
+
+Suppressions include disabled setting, pending permissions, active elicitation,
+plan mode, rate limit, early conversation, last response error, parent cache
+suppressions, abort, empty output, and filter rules.
+
+The prompt variant is currently `user_intent` in this source. Future docs should
+verify `getPromptVariant()` rather than assuming multiple variants are live.
+
+### Speculation Execution
+
+`services/PromptSuggestion/speculation.ts` can start a forked agent from the
+suggested next prompt. It constrains speculation by:
+
+- maximum speculation turns.
+- maximum messages.
+- safe read-only tools.
+- explicit write-tool handling.
+- overlay filesystem path under Claude temp.
+- denial for unsafe or unsupported operations.
+
+Speculation records tools executed, completion boundary, duration, and outcome
+through `tengu_speculation`. Accepted speculation can copy overlay-written files
+back into the main cwd. Aborts remove overlay state and log the outcome.
+
+### Background Invalidations
+
+Several task implementations abort active speculation when background state
+changes. `LocalAgentTask`, `LocalWorkflowTask`, `MonitorMcpTask`, and
+`QueryEngine` all import or call speculation abort paths. This is because a
+speculated result can become stale if background task output changes the state
+the next prompt would rely on.
+
+### SDK/Print Suggestion Path
+
+`cli/print.ts` can emit `prompt_suggestion` messages for SDK consumers. It uses
+`getLastCacheSafeParams()` and defers suggestion emission until after held-back
+results when background agents are running. That means prompt suggestions are
+also part of the automation protocol, not only the terminal overlay.
+
+### Telemetry Events
+
+Important event families include:
+
+- `tengu_dream_invoked`.
+- `tengu_prompt_suggestion_init`.
+- prompt suggestion suppression events.
+- `tengu_speculation`.
+- scheduled task events when dream schedules nightly consolidation.
+
+The source also records cache and generation ids for suggestions. Those ids are
+important for correlating display, acceptance, filtering, and speculation.

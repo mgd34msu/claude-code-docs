@@ -375,3 +375,145 @@ For a later release:
 8. Inspect telemetry event names and metadata fields.
 9. Inspect SDK schemas for tool-name compatibility.
 10. Validate that `Brief` legacy naming remains compatibility-only.
+
+## Deep 2.1.141 Brief Reconstruction
+
+Brief mode is implemented as both a tool and a display policy. The tool is
+`SendUserMessage`; the mode determines whether model-facing visible output is
+expected to go through that tool.
+
+### Source Map
+
+| Concern | Source |
+| --- | --- |
+| Tool schema and runtime gate | `source/src/tools/BriefTool/BriefTool.ts` |
+| Tool prompt text | `source/src/tools/BriefTool/prompt.ts` |
+| Attachment resolution | `source/src/tools/BriefTool/attachments.ts` |
+| Bridge upload | `source/src/tools/BriefTool/upload.ts` |
+| Slash command | `source/src/commands/brief.ts` |
+| CLI activation | `source/src/main.tsx` |
+| Registry placement | `source/src/tools.ts` |
+| Message filtering/rendering | `source/src/components/Messages.tsx`, `source/src/utils/messages.ts` |
+| Spinner/status layout | `source/src/components/Spinner.tsx`, `source/src/components/PromptInput/PromptInput.tsx` |
+| Settings UI | `source/src/components/Settings/Config.tsx` |
+
+### Tool Identity
+
+| Field | Value |
+| --- | --- |
+| Canonical name | `SendUserMessage` |
+| Legacy alias | `Brief` |
+| Description | Send a message to the user. |
+| Read-only | Yes. |
+| Concurrency safe | Yes. |
+| Max result size | `100000` chars. |
+| Auto-classifier projection | The `message` field. |
+
+New docs and configs should use `SendUserMessage`. The alias is compatibility
+only and is mostly useful for old transcripts or SDK/tool lists that still ask
+for `Brief`.
+
+### Input And Output Schemas
+
+Input fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `message` | string | Markdown-capable user-visible message. |
+| `attachments` | optional array | Either local file path strings or uploaded attachment objects. |
+| `status` | `normal` or `proactive` | Indicates whether this is a direct reply or unsolicited/proactive update. |
+
+Uploaded attachment objects have `file_uuid`, `file_name`, `size`, and
+`is_image`.
+
+Output fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `message` | string | Delivered message. |
+| `attachments` | optional array | Resolved attachment metadata, including optional `file_uuid`. |
+| `sentAt` | optional ISO string | Captured at tool execution time. Optional for old resumed sessions. |
+
+The output keeps `attachments` and `sentAt` optional to preserve replay
+compatibility with transcripts created before those fields existed.
+
+### Entitlement Vs Activation
+
+2.1.141 splits access into two questions:
+
+| Question | Function | Required conditions |
+| --- | --- | --- |
+| Is the user allowed to use Brief? | `isBriefEntitled()` | `feature("KAIROS")` or `feature("KAIROS_BRIEF")`, plus Kairos active, env override, or GrowthBook `tengu_kairos_brief`. |
+| Is the tool active now? | `isBriefEnabled()` | Entitlement plus Kairos active or `userMsgOptIn`. |
+
+The env var `CLAUDE_CODE_BRIEF` is a development/testing override that grants
+entitlement and activation through startup handling. It should not be described
+as just a display toggle; it participates in tool availability.
+
+### Activation Paths
+
+| Path | Source behavior |
+| --- | --- |
+| `--brief` | Calls `maybeActivateBrief()`, checks entitlement, sets `userMsgOptIn`, logs source `flag`. |
+| `CLAUDE_CODE_BRIEF` | Same startup path, logs source `env`. |
+| Settings `defaultView: "chat"` | In interactive sessions, entitled users get `userMsgOptIn` so chat view can use the tool. |
+| `--tools SendUserMessage` or `--tools Brief` | SDK/tool list opt-in when entitled. |
+| `/brief` | Toggles `isBriefOnly` and `userMsgOptIn`, but command visibility is separately controlled by `tengu_kairos_brief_config.enable_slash_command`. |
+| Assistant/Kairos mode | Bypasses user opt-in because assistant mode depends on the tool. |
+
+`/brief` can always turn off if currently on, even if entitlement later flips
+off. That prevents users from becoming stuck in a gated mode.
+
+### Rendering Policy
+
+Brief mode changes what the user is expected to read:
+
+| Area | Behavior |
+| --- | --- |
+| Assistant plain text | Hidden or de-emphasized in brief-only paths so the tool message is primary. |
+| Trailing assistant text after `SendUserMessage` | Filtered to avoid duplicated visible output. |
+| Spinner | Uses `BriefSpinner` and `BriefIdleStatus` with stable two-row footprint. |
+| Prompt input gap | PromptInput removes its normal gap when brief owns the layout. |
+| Todo/task reminder nags | Suppressed when `SendUserMessage` is available, because it becomes the primary communication channel. |
+| Conversation recovery | Treats a turn ending in `SendUserMessage` as complete, avoiding phantom interrupted-turn recovery. |
+
+The display behavior is why a model must put the actual answer in the tool
+call. A plain text "done" plus detailed answer outside the tool is a bad brief
+turn because the user may only see the tool payload.
+
+### Attachments And Uploads
+
+Attachment handling has two paths:
+
+| Attachment kind | Runtime behavior |
+| --- | --- |
+| Local path string | Validated, stat/read checks run, then resolved to metadata. |
+| Uploaded object | Passed through without local stat or upload; intended for device tools. |
+| Bridge upload | If bridge mode is active and upload succeeds, a private API `file_uuid` is attached. |
+
+Upload constraints:
+
+| Constraint | Value |
+| --- | --- |
+| Max upload size | 30 MB. |
+| Timeout | 30 seconds. |
+| Image MIME whitelist | png, jpg, jpeg, gif, webp. |
+| Non-image MIME | `application/octet-stream`. |
+| Auth | Bridge/OAuth token required. |
+| Failure behavior | Best effort; local attachment metadata remains useful if upload fails. |
+
+`CLAUDE_CODE_BRIEF_UPLOAD` is part of the attachment behavior surface and
+should be treated as a brief-specific environment variable, not a generic file
+upload control.
+
+### Telemetry
+
+| Event | Meaning |
+| --- | --- |
+| `tengu_brief_mode_enabled` | Startup activation through flag or env. |
+| `tengu_brief_mode_toggled` | Slash command or keybinding toggle, including gated failures. |
+| `tengu_brief_send` | Tool call delivered, with proactive flag and attachment count. |
+
+The important metadata split is activation source versus message send. A session
+can be entitled but inactive, active without a slash command, or active through
+Kairos; those should not be collapsed into one "brief enabled" concept.

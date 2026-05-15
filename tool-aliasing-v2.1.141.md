@@ -350,3 +350,78 @@ For a later release:
 8. Separate tool aliases from command/model/skill/keybinding aliases.
 9. Verify canonical names in docs and examples.
 10. Keep legacy names only in migration/compatibility sections.
+
+## Deep 2.1.141 Alias Mechanics Addendum
+
+Tool aliasing in 2.1.141 is explicit and narrow. A name is an alias only when a
+tool declares `aliases` or a parser deliberately normalizes a legacy name.
+
+### Tool Interface
+
+`Tool.ts` defines `aliases?: string[]` and two alias-aware helpers:
+
+- `toolMatchesName(tool, name)` returns true for primary name or alias.
+- `findToolByName(tools, name)` uses `toolMatchesName`.
+
+The comment is precise: aliases are for backwards compatibility when a tool is
+renamed. They are not synonyms, shell aliases, or fuzzy names.
+
+### Execution Fallback
+
+`services/tools/toolExecution.ts` first searches the available tools presented
+to the model. If no tool is found, it searches `getAllBaseTools()` and only
+falls back when the found tool includes the requested name in `aliases`. This
+supports old transcripts that call a deprecated name without allowing arbitrary
+hidden tools to execute by primary name.
+
+Example from source comments:
+
+- old `KillShell` calls can route to `TaskStop`.
+
+### Permission And Hook Normalization
+
+Permission and hook code normalizes legacy names:
+
+- `utils/permissions/permissionsLoader.ts` round-trips raw settings entries so legacy names match canonical forms.
+- `utils/hooks.ts` normalizes matcher names and tests regex matchers against legacy names.
+- `utils/permissions/yoloClassifier.ts` builds alias maps so classifier input can understand tool aliases.
+
+This means a rule or hook written against an old name may still match a current
+tool. It does not mean docs should recommend old names for new configs.
+
+### Known Source-Backed Alias Families
+
+The source scan shows these important alias categories:
+
+- `TaskStop` has alias `KillShell`.
+- message-queue functions keep backward-compatible notification aliases such as `subscribeToPendingNotifications`.
+- Brief mode exposes the primary communication tool through `SendUserMessage`; treat `Brief` as a legacy reference unless the current source exposes it.
+- `TaskOutput` compatibility appears in docs/source as Bash-output migration language and should be verified per release.
+- skill aliases exist separately, for example `/dream` has alias `/learn`.
+- command aliases exist separately, for example `--rc` is an alias for `--remote-control`.
+- model aliases are separate frontmatter/model-resolver behavior.
+
+Only the first category is tool aliasing in the strict `Tool.aliases` sense.
+
+### Alias Scope Rules
+
+Apply these rules in docs and future maps:
+
+- Tool alias: model/API tool-use name compatibility.
+- Slash command alias: user command invocation compatibility.
+- CLI flag alias: commander option compatibility.
+- Model alias: model resolver compatibility.
+- Shell alias: user shell environment behavior.
+- Permission legacy syntax: settings parser compatibility.
+- SDK schema compatibility: generated type/schema compatibility.
+
+Do not mix these. A shell alias named `rg` is not a Claude tool alias. A slash
+skill alias `/learn` is not a model tool name. A permission legacy name can
+match a tool without being shown as a current tool name.
+
+### Future Extraction Guidance
+
+When mapping a later minified release, preserve the primary canonical name as
+the file/function name. Put legacy names in migration sections only. If a
+function accepts both primary and legacy names, name it around normalization or
+compatibility, not around one legacy alias.

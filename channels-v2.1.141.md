@@ -455,3 +455,148 @@ For a later release:
    features.
 9. Compare telemetry event names and metadata.
 10. Test disabled, enabled, reconnect, and permission-denied cases separately.
+
+## Deep 2.1.141 Channel Reconstruction
+
+MCP channels in 2.1.141 are inbound push notifications from selected MCP
+servers. They are not ordinary tool calls, and the channel permission relay is
+a separate opt-in protocol layered on top.
+
+### Source Map
+
+| Concern | Source |
+| --- | --- |
+| CLI flag parsing | `source/src/main.tsx` |
+| Session channel state | `source/src/bootstrap/state.ts` |
+| Development-channel warning | `source/src/components/DevChannelsDialog.tsx`, `source/src/interactiveHelpers.tsx` |
+| Gate and schemas | `source/src/services/mcp/channelNotification.ts` |
+| GrowthBook allowlist | `source/src/services/mcp/channelAllowlist.ts` |
+| Permission relay | `source/src/services/mcp/channelPermissions.ts` |
+| MCP registration | `source/src/services/mcp/useManageMCPConnections.ts` |
+| Print/SDK channel enable | `source/src/cli/print.ts` |
+| UI notice | `source/src/components/LogoV2/ChannelsNotice.tsx` |
+| Plugin manifest channel schema | `source/src/utils/plugins/schemas.ts` |
+| Plugin channel config merge | `source/src/utils/plugins/mcpPluginIntegration.ts` |
+
+### CLI Trust Declarations
+
+The parser accepts tagged entries only:
+
+| Entry | Meaning |
+| --- | --- |
+| `plugin:<name>@<marketplace>` | User intends to trust a marketplace plugin channel, subject to marketplace verification and allowlist policy. |
+| `server:<name>` | User names a manually configured MCP server. In production it cannot pass the plugin allowlist unless marked dev. |
+
+The dev flag `--dangerously-load-development-channels` is interactive-only and
+marks entries with `dev: true`. That flag bypasses the allowlist for those
+specific entries only. Passing both flags does not leak dev trust to normal
+`--channels` entries because the bypass is per entry, not session global.
+
+### Channel Entry State
+
+`bootstrap/state.ts` stores parsed entries as:
+
+| Kind | Fields |
+| --- | --- |
+| plugin | `kind`, `name`, `marketplace`, optional `dev` |
+| server | `kind`, `name`, optional `dev` |
+
+It also stores `hasDevChannels` so UI notices can explain whether the session
+is listening through normal channel flags or development-channel flags.
+
+### Gate Order
+
+`gateChannelServer()` applies the gate in this order:
+
+1. Server must declare `capabilities.experimental["claude/channel"]`.
+2. Provider must be first-party.
+3. Runtime gate `tengu_harbor` must be enabled.
+4. Team/Enterprise orgs must set managed `channelsEnabled: true`.
+5. Server must match the current session's `--channels` list.
+6. Plugin entries must match the installed plugin marketplace source.
+7. Non-dev plugin entries must be present in the effective allowlist.
+8. Non-dev server entries are blocked because the allowlist schema is plugin-only.
+
+The skip kinds are `capability`, `provider`, `disabled`, `policy`, `session`,
+`marketplace`, and `allowlist`. Capability misses are expected for ordinary MCP
+servers and are not surfaced to the user.
+
+### Effective Allowlist
+
+The allowlist has two sources:
+
+| Source | Behavior |
+| --- | --- |
+| GrowthBook `tengu_harbor_ledger` | Default plugin allowlist for unmanaged users. |
+| Managed `allowedChannelPlugins` | Replaces the ledger for Team/Enterprise orgs when set. |
+
+The allowlist key is `{ marketplace, plugin }`, not server name. If a plugin is
+approved, all channel servers declared by that plugin are trusted at the
+plugin-granularity level.
+
+### Notification Protocol
+
+Inbound messages use:
+
+| Field | Value |
+| --- | --- |
+| Method | `notifications/claude/channel` |
+| Params | `{ content: string, meta?: Record<string, string> }` |
+| Required server capability | `experimental["claude/channel"]` |
+| Queue behavior | Enqueued as prompt with priority `next`, `isMeta: true`, `skipSlashCommands: true`. |
+| Origin | `{ kind: "channel", server: client.name }` |
+
+The runtime wraps inbound content as:
+
+```xml
+<channel source="serverName" optional_meta="value">
+content
+</channel>
+```
+
+Meta keys are filtered through a strict identifier regex because keys become XML
+attribute names. Values and the server name are XML-escaped.
+
+### Permission Relay Protocol
+
+Channel permission relay is gated separately by `tengu_harbor_permissions` and
+requires an additional capability:
+
+| Direction | Method | Payload |
+| --- | --- | --- |
+| Claude Code to server | `notifications/claude/channel/permission_request` | `request_id`, `tool_name`, `description`, `input_preview` |
+| Server to Claude Code | `notifications/claude/channel/permission` | `request_id`, `behavior` of `allow` or `deny` |
+
+The server is responsible for parsing the human reply. Claude Code does not
+regex-match text from the general channel. The exported reply regex accepts
+`y`, `yes`, `n`, or `no` plus a five-letter id from an alphabet that excludes
+`l`. Request ids are deterministic hashes of the tool use id with a small
+substring blocklist to avoid offensive accidental words.
+
+### Print And SDK Channel Enable
+
+`cli/print.ts` supports an IDE/control request subtype `channel_enable`.
+Important limits:
+
+| Behavior | Detail |
+| --- | --- |
+| Plugin sourced only | The server must be plugin-sourced so marketplace identity can be checked. |
+| Gate still runs | `channel_enable` derives a `ChannelEntry` and runs the same channel gate. |
+| No permission relay | Print channel enable intentionally does not register the channel permission handler. |
+| Reconnect handling | Channel notification handlers are re-registered after MCP reconnect for enabled servers. |
+
+This is why channel docs should not imply print/SDK mode has the full
+interactive permission relay semantics.
+
+### Telemetry
+
+| Event | Meaning |
+| --- | --- |
+| `tengu_mcp_channel_flags` | CLI channel flags parsed, counts and plugin ids. |
+| `tengu_mcp_channel_gate` | Per-server registration or skip outcome, excluding capability-only noise. |
+| `tengu_mcp_channel_message` | Inbound channel notification received and queued. |
+| `tengu_mcp_channel_enable` | IDE/control channel enable path invoked. |
+
+Telemetry logs plugin identifiers for plugin-kind entries, dev status, entry
+kind, registered status, skip kind, content length, and meta key count. It does
+not need to log raw channel content to understand gate behavior.

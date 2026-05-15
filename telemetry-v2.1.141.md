@@ -644,3 +644,128 @@ For future releases, use this telemetry audit sequence:
    manually inspect new `tengu_` strings.
 10. Confirm that new event metadata uses safe categorical fields rather than raw
     prompt/code/path data.
+
+## Deep 2.1.141 Telemetry Reconstruction
+
+2.1.141 telemetry is a fanout system: local call sites emit typed analytics,
+metrics, trace/log records, debug logs, and stream protocol events. Those are
+related but not interchangeable.
+
+### Source Map
+
+| Concern | Source |
+| --- | --- |
+| Analytics API | `source/src/services/analytics/index.ts` |
+| Metadata typing/sanitization | `source/src/services/analytics/metadata.ts` |
+| Sink fanout | `source/src/services/analytics/sink.ts` |
+| Analytics config | `source/src/services/analytics/config.ts` |
+| Datadog exporter | `source/src/services/analytics/datadog.ts` |
+| First-party event logging | `source/src/services/analytics/firstPartyEventLogger.ts`, `firstPartyEventLoggingExporter.ts` |
+| GrowthBook | `source/src/services/analytics/growthbook.ts` |
+| OTel instrumentation | `source/src/utils/telemetry/instrumentation.ts` |
+| Perfetto tracing | `source/src/utils/telemetry/perfettoTracing.ts` |
+| Session tracing | `source/src/utils/telemetry/sessionTracing.ts` |
+| Cost/token counters | `source/src/cost-tracker.ts`, `source/src/bootstrap/state.ts` |
+| Print/headless profiling | `source/src/utils/headlessProfiler.ts`, `source/src/cli/print.ts` |
+
+### Event Family Map
+
+| Family | Representative events | Meaning |
+| --- | --- | --- |
+| Startup/session | `tengu_init`, `tengu_continue`, `tengu_exit`, `tengu_concurrent_sessions` | Session lifecycle and CLI startup properties. |
+| Print/headless | `tengu_continue_print`, headless latency events | Non-interactive usage, resume, and latency. |
+| Tools | `tengu_bash_tool_command_executed`, `tengu_file_operation`, `tengu_monitor_tool_started` | Tool execution and high-level decisions. |
+| Permissions | `tengu_internal_tool_permission_decision`, permission request events | Permission prompts, denials, auto/bypass decisions. |
+| Auto mode | `tengu_auto_mode_outcome`, `tengu_auto_mode_decision` | Classifier outcome and safety decisions. |
+| Hooks | `tengu_pre_tool_hook_error`, `tengu_post_tool_hook_error`, hook cancellation events | Hook failures/cancellations, not stream hook events. |
+| MCP | `tengu_mcp_*` events including auth, channels, list changes, tools loaded | MCP lifecycle and channel behavior. |
+| Brief/Kairos | `tengu_brief_mode_enabled`, `tengu_brief_mode_toggled`, `tengu_brief_send` | Brief activation and sends. |
+| Agent teams/background | `tengu_team_created`, `tengu_team_deleted`, background/agent events | Swarm/team/background task behavior. |
+| Agent View | background session events, fleet/session status events | Background session discovery and attach/ps behavior. |
+| Prompt/cache/compact | `tengu_compact`, cache sharing/fallback, prompt cache break events | Context compaction and cache behavior. |
+| Settings/config | `tengu_config_changed`, managed settings events, migration events | Config changes and policy state. |
+| Plugins/marketplace | marketplace add/remove/update, plugin install events | Plugin lifecycle. |
+| IDE/bridge/remote | `tengu_bridge_*`, `tengu_ext_*`, CCR events | Remote control, IDE, and bridge connection behavior. |
+| Updates/install | native/package updater/install events | Binary/package update path. |
+
+### Privacy Boundary
+
+The telemetry code uses explicit metadata types such as
+`AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS` to mark values that
+have been reviewed as safe categorical data. This is a strong signal in source:
+when a field is cast through that type, the author intended to avoid raw code,
+paths, or prompt text.
+
+Useful rules for reading 2.1.141 telemetry:
+
+1. Event names are often `tengu_` prefixed, but not every `tengu_` string is
+   equally user-facing.
+2. Metadata often records counts, booleans, source names, skip kinds, and mode
+   names instead of raw content.
+3. Some protocol events in stream-json are not analytics events.
+4. Debug logs and diagnostics logs are separate from analytics sink events.
+5. OTel metrics/counters are separate from event logging even when they share
+   source files.
+
+### Controls And Disable Paths
+
+| Control | Effect |
+| --- | --- |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Disables or limits nonessential network paths, including some registry/telemetry-adjacent traffic. |
+| Privacy/config disable settings | Control analytics behavior through config helpers. |
+| `CLAUDE_CODE_ENABLE_TELEMETRY` | Enables OTel instrumentation path. |
+| `CLAUDE_CODE_DATADOG_FLUSH_INTERVAL_MS` | Datadog flush timing. |
+| `CLAUDE_CODE_OTEL_FLUSH_TIMEOUT_MS` | OTel flush timeout. |
+| `CLAUDE_CODE_OTEL_SHUTDOWN_TIMEOUT_MS` | OTel shutdown timeout. |
+| Provider mode env vars | Provider choice affects auth and metadata, not just model routing. |
+
+Do not describe telemetry as a single off/on switch. The runtime contains
+separate controls for product analytics, OTel metrics/logs/traces, debug logs,
+diagnostics, first-party event logging, and nonessential traffic.
+
+### Print Mode Telemetry
+
+Print mode is tracked as a different surface rather than as "interactive with
+no TTY":
+
+| Area | Print-specific behavior |
+| --- | --- |
+| CLI init | Startup metadata records `print` in `tengu_init` style metadata. |
+| Resume | `tengu_continue_print` separates print resume from interactive continue. |
+| Query source | API paths can use query source `sdk` or print/headless variants. |
+| Hooks | Stream-json can include hook lifecycle subtypes when requested. |
+| MCP channels | `channel_enable` control path logs `tengu_mcp_channel_enable`. |
+| Headless profiling | Separate latency profiling utilities measure headless paths. |
+
+### Metrics And Counters
+
+Bootstrap state stores counters/meters for:
+
+| Counter | Meaning |
+| --- | --- |
+| `sessionCounter` | Session count. |
+| `locCounter` | Lines-of-code/edit counters. |
+| `prCounter` | Pull request count. |
+| `commitCounter` | Commit count. |
+| `costCounter` | Cost. |
+| `tokenCounter` | Token usage. |
+| `codeEditToolDecisionCounter` | Edit tool decision metrics. |
+| `activeTimeCounter` | Active time. |
+| `statsStore` | Local stats observations. |
+
+These are metric observations, not necessarily user-visible analytics events.
+
+### Future Diff Process
+
+For future releases, diff telemetry in this order:
+
+1. Extract every `logEvent(` call and group by source file.
+2. Extract every `tengu_` literal and classify whether it is analytics,
+   stream protocol, debug, or test/config data.
+3. Extract metadata type casts to identify intentionally safe categorical
+   fields.
+4. Compare GrowthBook keys because many telemetry and feature decisions are
+   coupled.
+5. Compare print/SDK paths separately from interactive REPL paths.
+6. Compare bridge/remote/CCR paths separately because those include session and
+   transport metadata not present locally.
